@@ -12,7 +12,8 @@ st.set_page_config(page_title="FA期間 自主トレチェック", layout="cente
 # ======================
 # CSS（文字サイズ調整）
 # ======================
-st.markdown("""
+st.markdown(
+    """
 <style>
 html, body, [class*="css"]  { font-size: 20px !important; }
 h1 { font-size: 40px !important; }
@@ -21,23 +22,23 @@ h3 { font-size: 24px !important; }
 label, p, li, div { font-size: 20px !important; }
 a, button { font-size: 20px !important; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # ======================
-# Paths
+# パス
 # ======================
 DATA_PATH = "data.csv"
-
-# 種目リストは「CSVを正」とする（B案）
-CSV_PATH = "assets/trainings_list/trainings_list.csv"
-# 保険でExcelも読めるよう残す（無くても落ちない）
-XLSX_PATH = "assets/trainings_list/trainings_list.xlsx"
+TRAININGS_DIR = "assets/trainings_list"
+TRAININGS_CSV_PATH = os.path.join(TRAININGS_DIR, "trainings_list.csv")   # ★B案：CSV優先
+TRAININGS_XLSX_PATH = os.path.join(TRAININGS_DIR, "trainings_list.xlsx")  # 予備（無ければCSVだけでOK）
 
 WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
 # ======================
-# 週間メニュー（FA期間の基本）
+# 週間メニュー（FA期間の基本：更新版）
 # 月：OFF（ストレッチのみ）
 # 火：背中
 # 水：腹
@@ -60,10 +61,10 @@ DAY_TITLE = {
     "BACK": "背中DAY（チューブ）",
     "CHEST": "胸DAY（チューブ）",
     "CORE": "腹・体幹DAY（チューブ）",
-    "OFF": "OFF（休養）",
+    "OFF": "OFF（ストレッチのみ）",
 }
 
-# Excel/CSVの「部位」→DAYへの割当（あなたの列値に合わせる）
+# Excel/CSVの「部位」→DAYへの割当（マスタの値に合わせる）
 PART_TO_DAY = {
     "背筋": "BACK",
     "背中＋胸": "BACK",
@@ -84,7 +85,7 @@ COMMON_RULES = [
     "必須は必ず実施。選択から追加して合計3〜4種目",
 ]
 
-# 種目ごとの注意点（短文）
+# 種目ごとの「注意点（超短文）」
 EX_TIPS = {
     "デッドリフト": "背中は一直線。腕で引かず、床を押すイメージ。",
     "シーテッドローイング": "肩をすくめない。肘を後ろへ引いて肩甲骨を寄せる。",
@@ -100,20 +101,19 @@ EX_TIPS = {
 }
 
 # ======================
-# 毎日（共通）メニュー：A案（軽負荷・実施チェックだけ）
+# 毎日（共通）メニュー：A案（継続）
 # ======================
 DAILY_REQUIRED = [
     {"name": "ボールタッチ（5分）", "part": "毎日・ボール", "tip": "軽めでOK。感覚維持が目的。"},
 ]
 
-# 日替わり（任意）
 DAILY_OPTIONAL_BY_WEEKDAY = {
-    "mon": {"name": "ストレッチ（10〜15分）", "part": "毎日・回復", "tip": "回復目的。伸ばすだけでOK。"},
-    "tue": {"name": "縄跳び（3分）", "part": "毎日・刺激", "tip": "軽めでOK。フォーム重視。"},
-    "wed": {"name": "軽めラン（10分）", "part": "毎日・刺激", "tip": "息が上がらない強度で。"},
+    "mon": {"name": "ストレッチ（10〜15分）", "part": "毎日・回復", "tip": "頑張らない。回復優先。"},
+    "tue": {"name": "軽めラン（10分）", "part": "毎日・刺激", "tip": "息が上がらない強度で。"},
+    "wed": {"name": "縄跳び（3分）", "part": "毎日・刺激", "tip": "リズムよく。無理に追い込まない。"},
     "thu": {"name": "散歩（10分）", "part": "毎日・回復", "tip": "回復目的。気分転換でOK。"},
-    "fri": {"name": "縄跳び（3分）", "part": "毎日・刺激", "tip": "短くOK。体を温める程度。"},
-    "sat": {"name": "軽めラン（10分）", "part": "毎日・刺激", "tip": "疲労を残さないペースで。"},
+    "fri": {"name": "軽めラン（10分）", "part": "毎日・刺激", "tip": "疲労を残さないペースで。"},
+    "sat": {"name": "縄跳び（3分）", "part": "毎日・刺激", "tip": "短くOK。体を温める程度。"},
     "sun": {"name": "散歩（10分）", "part": "毎日・回復", "tip": "回復優先。"},
 }
 
@@ -134,22 +134,18 @@ def extract_youtube_id(url: str) -> str:
     host = (parsed.netloc or "").lower()
     path = parsed.path or ""
 
-    # youtu.be/VIDEO_ID
     if "youtu.be" in host:
         vid = path.lstrip("/").split("/")[0]
         return vid
 
-    # youtube.com/watch?v=VIDEO_ID
     if "youtube.com" in host:
         qs = parse_qs(parsed.query)
         if "v" in qs and len(qs["v"]) > 0:
             return qs["v"][0]
 
-        # /embed/VIDEO_ID
         if "/embed/" in path:
             return path.split("/embed/")[-1].split("/")[0]
 
-        # /shorts/VIDEO_ID
         if "/shorts/" in path:
             return path.split("/shorts/")[-1].split("/")[0]
 
@@ -178,43 +174,71 @@ def build_youtube_urls(url: str, start_sec: int) -> dict:
     return {"embed_url": embed, "watch_url": watch}
 
 def is_youtube_url(url: str) -> bool:
-    return bool(extract_youtube_id(url or ""))
+    return bool(extract_youtube_id(url))
 
 # ======================
-# 種目リスト読み込み（CSV優先 / KeyError潰し）
+# 便利：列の安全確保（KeyError防止）
+# ======================
+RECORD_COLUMNS = ["date", "weekday", "day", "item", "part", "done", "weight"]
+
+def normalize_record_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    旧data.csv（menu/category）でも動くように正規化。
+    - menu -> day
+    - category -> part
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=RECORD_COLUMNS)
+
+    df2 = df.copy()
+
+    # 旧列名の救済
+    if "day" not in df2.columns and "menu" in df2.columns:
+        df2.rename(columns={"menu": "day"}, inplace=True)
+    if "part" not in df2.columns and "category" in df2.columns:
+        df2.rename(columns={"category": "part"}, inplace=True)
+
+    # 足りない列を追加
+    for c in RECORD_COLUMNS:
+        if c not in df2.columns:
+            df2[c] = None
+
+    # 型の整形
+    df2["done"] = df2["done"].astype("bool", errors="ignore") if "done" in df2.columns else False
+    df2["weight"] = pd.to_numeric(df2["weight"], errors="coerce") if "weight" in df2.columns else None
+
+    # dateはdatetime化しても、保存は文字列にする（後段で扱う）
+    if "date" in df2.columns and not df2.empty:
+        df2["date"] = pd.to_datetime(df2["date"], errors="coerce")
+
+    return df2[RECORD_COLUMNS]
+
+# ======================
+# 種目マスタ読み込み（CSV優先：B案）
 # ======================
 @st.cache_data(show_spinner=False)
 def load_training_list() -> pd.DataFrame:
     """
-    種目リスト（固定マスタ）
-    - B案：CSVを正として読む
-    - CSVが無い場合のみXLSXを保険で読む
-    - 読めなくても落ちない（必要列を必ず返す）
+    種目マスタを読み込む。
+    優先順位：CSV（trainings_list.csv）→ XLSX（trainings_list.xlsx）
     """
-    base_cols = ["種目名", "部位", "動画LINK", "動画開始時間(sec)", "必須/選択"]
+    # どちらも無ければ空
+    if not os.path.exists(TRAININGS_CSV_PATH) and not os.path.exists(TRAININGS_XLSX_PATH):
+        return pd.DataFrame(
+            columns=["種目名", "部位", "動画LINK", "動画開始時間(sec)", "必須/選択", "DAY", "is_required", "video_embed_url", "video_watch_url"]
+        )
 
-    df = None
-
-    # 1) CSV
-    if os.path.exists(CSV_PATH):
+    if os.path.exists(TRAININGS_CSV_PATH):
+        # CSVはExcel経由だと BOM 付きになることがあるので utf-8-sig を優先
         try:
-            df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
+            df = pd.read_csv(TRAININGS_CSV_PATH, encoding="utf-8-sig")
         except Exception:
-            df = None
+            df = pd.read_csv(TRAININGS_CSV_PATH, encoding="utf-8")
+    else:
+        df = pd.read_excel(TRAININGS_XLSX_PATH)
 
-    # 2) XLSX（保険）
-    if df is None and os.path.exists(XLSX_PATH):
-        try:
-            df = pd.read_excel(XLSX_PATH)
-        except Exception:
-            df = None
-
-    # 3) どっちも無ければ空で返す（ただし必要列は持たせる）
-    if df is None:
-        df = pd.DataFrame(columns=base_cols)
-
-    # 想定列がないと落ちるので保険（列を追加）
-    for col in base_cols:
+    # 想定列がないと落ちるので保険
+    for col in ["種目名", "部位", "動画LINK", "動画開始時間(sec)", "必須/選択"]:
         if col not in df.columns:
             df[col] = ""
 
@@ -228,16 +252,16 @@ def load_training_list() -> pd.DataFrame:
     # 開始秒を数値化（欠損は0）
     df["動画開始時間(sec)"] = pd.to_numeric(df["動画開始時間(sec)"], errors="coerce").fillna(0).astype(int)
 
-    # DAY付与（必ず作る）
+    # DAY付与
     df["DAY"] = df["部位"].map(PART_TO_DAY).fillna("OTHER")
 
     # 必須判定（基本はマスタに従う）
     df["is_required"] = df["必須/選択"].isin(["必須", "Required", "REQ"])
 
-    # CHESTは全部必須に強制（胸は少数想定）
+    # ★CHESTは全部必須に強制（種目数が少ない想定）
     df.loc[df["DAY"] == "CHEST", "is_required"] = True
 
-    # YouTube URL（embed/watch）を必ず作る
+    # YouTube URL（embed/watch）を生成
     def _urls(row):
         d = build_youtube_urls(row["動画LINK"], row["動画開始時間(sec)"])
         return pd.Series([d["embed_url"], d["watch_url"]])
@@ -247,42 +271,49 @@ def load_training_list() -> pd.DataFrame:
     return df
 
 # ======================
-# 記録CSV（data.csv）
+# 記録データ（data.csv）
 # ======================
 def ensure_data():
     if not os.path.exists(DATA_PATH):
-        df0 = pd.DataFrame(columns=["date", "weekday", "day", "item", "part", "done", "weight"])
+        df0 = pd.DataFrame(columns=RECORD_COLUMNS)
         df0.to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
 
 def load_data():
     ensure_data()
     try:
-        df = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
+        raw = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
     except Exception:
-        # 壊れてたら作り直す
         try:
-            os.remove(DATA_PATH)
+            raw = pd.read_csv(DATA_PATH, encoding="utf-8")
         except Exception:
-            pass
-        ensure_data()
-        df = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
+            # 壊れてたら作り直す
+            try:
+                os.remove(DATA_PATH)
+            except Exception:
+                pass
+            ensure_data()
+            raw = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
 
-    if "date" in df.columns and not df.empty:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = normalize_record_df(raw)
     return df
 
 def save_data(df: pd.DataFrame):
-    df.to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
+    # 保存は文字列に落とす（Excelで見ても分かりやすく）
+    out = df.copy()
+    if "date" in out.columns and not out.empty:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    out.to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
 
 def upsert_done_row(df: pd.DataFrame, d: date, weekday_key: str, day_key: str, name: str, part: str, done: bool):
-    """同じ日付×DAY×種目があれば上書き、なければ追加"""
+    """
+    同じ日付×DAY×種目があれば上書き、なければ追加
+    """
+    df = normalize_record_df(df)
+
     d_str = d.strftime("%Y-%m-%d")
 
     df2 = df.copy()
-    if "date" in df2.columns and not df2.empty:
-        df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    else:
-        df2["date_str"] = []
+    df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
 
     mask = (df2["date_str"] == d_str) & (df2["day"] == day_key) & (df2["item"] == name)
 
@@ -306,7 +337,8 @@ def upsert_done_row(df: pd.DataFrame, d: date, weekday_key: str, day_key: str, n
             "weight": None,
         }
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    return df
+
+    return normalize_record_df(df)
 
 # ======================
 # データロード
@@ -386,29 +418,23 @@ st.divider()
 # OFF
 # ----------------------
 if day_key == "OFF":
-    st.info("今日はトレーニングは休み（回復日）です。**ストレッチ10〜15分だけは必ず**やりましょう。")
+    st.info("今日はOFF（回復日）です。**ストレッチ10〜15分だけは必ず**やりましょう。")
 
 # ----------------------
-# トレ表示（子ども側）
+# トレ表示
 # ----------------------
 if day_key != "OFF":
-    # KeyError防止：必要列が無ければ空扱い
-    if train_df is None or train_df.empty or "DAY" not in train_df.columns:
-        st.warning("種目リスト（CSV/Excel）が読み込めていません。assets/trainings_list/trainings_list.csv を確認してください。")
-        today_items = pd.DataFrame()
-    else:
-        today_items = train_df[train_df["DAY"] == day_key].copy()
+    today_items = train_df[train_df["DAY"] == day_key].copy()
 
     if today_items.empty:
-        st.error("このDAYに該当する種目がありません。CSVの「部位」表記が想定（背筋/胸/腹筋＋体幹など）になっているか確認してください。")
+        st.error("このDAYに該当する種目がマスタにありません。マスタの「部位」表記を確認してください。")
     else:
         st.header(DAY_TITLE.get(day_key, day_key))
 
-        required_df = today_items[today_items["is_required"]].copy() if "is_required" in today_items.columns else today_items.copy()
-        optional_df = today_items[~today_items["is_required"]].copy() if "is_required" in today_items.columns else pd.DataFrame()
+        required_df = today_items[today_items["is_required"]].copy()
+        optional_df = today_items[~today_items["is_required"]].copy()
 
-        # 追加種目を選ぶUI
-        optional_names = optional_df["種目名"].tolist() if not optional_df.empty else []
+        optional_names = optional_df["種目名"].tolist()
         add_choice = None
         if len(optional_names) > 0:
             st.subheader("追加する種目（任意）")
@@ -431,24 +457,23 @@ if day_key != "OFF":
             checks = {}
 
             for r in display_rows:
-                name = str(r.get("種目名", ""))
-                part = str(r.get("部位", ""))
+                name = str(r["種目名"])
+                part = str(r["部位"])
                 tip = EX_TIPS.get(name, "")
 
                 embed_url = str(r.get("video_embed_url", "")).strip()
                 watch_url = str(r.get("video_watch_url", "")).strip()
 
-                badge = "【必須】" if bool(r.get("is_required", False)) else "【追加】"
+                badge = "【必須】" if bool(r["is_required"]) else "【追加】"
                 st.subheader(f"{badge} {name}")
 
                 if tip:
                     st.write(f"注意：{tip}")
 
-                # YouTube
                 if embed_url and is_youtube_url(watch_url or embed_url):
                     st.video(embed_url)
                     if watch_url:
-                        st.link_button("▶ YouTubeで開く", watch_url)
+                        st.link_button("▶ YouTubeで開く（指定秒から）", watch_url)
                 elif watch_url:
                     st.link_button("▶ 動画/解説を見る（外部リンク）", watch_url)
 
@@ -477,26 +502,23 @@ if day_key != "OFF":
 
         st.divider()
 
-        # 参考：他の候補
         with st.expander("他の候補（今日はやらなくてOK）", expanded=False):
             if optional_df.empty:
                 st.write("（選択候補なし）")
             else:
                 for _, r in optional_df.iterrows():
-                    st.write(f"・{r.get('種目名','')}（{r.get('部位','')}）")
+                    st.write(f"・{r['種目名']}（{r['部位']}）")
 
     # 体重入力
     st.subheader("体重（kg）")
     weight = st.number_input("今日の体重", min_value=30.0, max_value=90.0, step=0.1)
 
     if st.button("体重を保存"):
+        df = normalize_record_df(df)
         d_str = selected_date.strftime("%Y-%m-%d")
 
         df2 = df.copy()
-        if not df2.empty and "date" in df2.columns:
-            df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        else:
-            df2["date_str"] = []
+        df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
 
         mask = (df2["date_str"] == d_str) & (df2["day"] == "WEIGHT") & (df2["item"] == "weight")
 
@@ -521,6 +543,7 @@ if day_key != "OFF":
             }
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
 
+        df = normalize_record_df(df)
         save_data(df)
         st.success("体重を保存しました！")
 
@@ -531,20 +554,20 @@ if parent_view:
     st.divider()
     st.header("体重推移")
 
-    if not df.empty and "weight" in df.columns:
-        weight_df = df.dropna(subset=["weight"]).copy()
-        if not weight_df.empty:
-            weight_df["date"] = pd.to_datetime(weight_df["date"], errors="coerce")
-            weight_df = weight_df.dropna(subset=["date"]).sort_values("date")
-            st.line_chart(weight_df.set_index("date")["weight"])
-        else:
-            st.info("まだ体重データがありません。")
+    df = normalize_record_df(df)
+
+    weight_df = df.dropna(subset=["weight"]).copy()
+    if not weight_df.empty:
+        weight_df["date"] = pd.to_datetime(weight_df["date"], errors="coerce")
+        weight_df = weight_df.dropna(subset=["date"]).sort_values("date")
+        st.line_chart(weight_df.set_index("date")["weight"])
     else:
         st.info("まだ体重データがありません。")
 
     st.header("トレ実施数（部位別）")
-    if not df.empty and "part" in df.columns:
-        part_df = df[df["done"] == True].groupby("part").size()
+    done_df = df[df["done"] == True].copy()
+    if not done_df.empty:
+        part_df = done_df.groupby("part").size()
         if not part_df.empty:
             st.bar_chart(part_df)
         else:
