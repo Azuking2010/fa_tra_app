@@ -12,8 +12,7 @@ st.set_page_config(page_title="FA期間 自主トレチェック", layout="cente
 # ======================
 # CSS（文字サイズ調整）
 # ======================
-st.markdown(
-    """
+st.markdown("""
 <style>
 html, body, [class*="css"]  { font-size: 20px !important; }
 h1 { font-size: 40px !important; }
@@ -22,20 +21,23 @@ h3 { font-size: 24px !important; }
 label, p, li, div { font-size: 20px !important; }
 a, button { font-size: 20px !important; }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
+# ======================
+# Paths
+# ======================
 DATA_PATH = "data.csv"
+
+# 種目リストは「CSVを正」とする（B案）
+CSV_PATH = "assets/trainings_list/trainings_list.csv"
+# 保険でExcelも読めるよう残す（無くても落ちない）
 XLSX_PATH = "assets/trainings_list/trainings_list.xlsx"
 
 WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
 # ======================
-# 週間メニュー（固定）
-# ======================
-# FA期間の基本（あなた指定）
+# 週間メニュー（FA期間の基本）
 # 月：OFF（ストレッチのみ）
 # 火：背中
 # 水：腹
@@ -43,6 +45,7 @@ WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
 # 金：背中
 # 土：腹
 # 日：胸
+# ======================
 DAY_PLAN = {
     "mon": "OFF",
     "tue": "BACK",
@@ -60,7 +63,7 @@ DAY_TITLE = {
     "OFF": "OFF（休養）",
 }
 
-# Excelの「部位」→DAYへの割当
+# Excel/CSVの「部位」→DAYへの割当（あなたの列値に合わせる）
 PART_TO_DAY = {
     "背筋": "BACK",
     "背中＋胸": "BACK",
@@ -81,7 +84,7 @@ COMMON_RULES = [
     "必須は必ず実施。選択から追加して合計3〜4種目",
 ]
 
-# 種目ごとの「注意点（超短文）」
+# 種目ごとの注意点（短文）
 EX_TIPS = {
     "デッドリフト": "背中は一直線。腕で引かず、床を押すイメージ。",
     "シーテッドローイング": "肩をすくめない。肘を後ろへ引いて肩甲骨を寄せる。",
@@ -97,19 +100,20 @@ EX_TIPS = {
 }
 
 # ======================
-# 毎日（共通）メニュー：A案
+# 毎日（共通）メニュー：A案（軽負荷・実施チェックだけ）
 # ======================
 DAILY_REQUIRED = [
     {"name": "ボールタッチ（5分）", "part": "毎日・ボール", "tip": "軽めでOK。感覚維持が目的。"},
 ]
 
+# 日替わり（任意）
 DAILY_OPTIONAL_BY_WEEKDAY = {
-    "mon": {"name": "縄跳び（3分）", "part": "毎日・刺激", "tip": "軽めでOK。フォーム重視。"},
-    "tue": {"name": "軽めラン（10分）", "part": "毎日・刺激", "tip": "息が上がらない強度で。"},
-    "wed": {"name": "縄跳び（3分）", "part": "毎日・刺激", "tip": "リズムよく。無理に追い込まない。"},
+    "mon": {"name": "ストレッチ（10〜15分）", "part": "毎日・回復", "tip": "回復目的。伸ばすだけでOK。"},
+    "tue": {"name": "縄跳び（3分）", "part": "毎日・刺激", "tip": "軽めでOK。フォーム重視。"},
+    "wed": {"name": "軽めラン（10分）", "part": "毎日・刺激", "tip": "息が上がらない強度で。"},
     "thu": {"name": "散歩（10分）", "part": "毎日・回復", "tip": "回復目的。気分転換でOK。"},
-    "fri": {"name": "軽めラン（10分）", "part": "毎日・刺激", "tip": "疲労を残さないペースで。"},
-    "sat": {"name": "縄跳び（3分）", "part": "毎日・刺激", "tip": "短くOK。体を温める程度。"},
+    "fri": {"name": "縄跳び（3分）", "part": "毎日・刺激", "tip": "短くOK。体を温める程度。"},
+    "sat": {"name": "軽めラン（10分）", "part": "毎日・刺激", "tip": "疲労を残さないペースで。"},
     "sun": {"name": "散歩（10分）", "part": "毎日・回復", "tip": "回復優先。"},
 }
 
@@ -151,7 +155,6 @@ def extract_youtube_id(url: str) -> str:
 
     return ""
 
-
 def build_youtube_urls(url: str, start_sec: int) -> dict:
     """
     YouTubeなら
@@ -174,81 +177,89 @@ def build_youtube_urls(url: str, start_sec: int) -> dict:
 
     return {"embed_url": embed, "watch_url": watch}
 
-
 def is_youtube_url(url: str) -> bool:
-    return bool(extract_youtube_id(url))
-
+    return bool(extract_youtube_id(url or ""))
 
 # ======================
-# 関数
+# 種目リスト読み込み（CSV優先 / KeyError潰し）
 # ======================
 @st.cache_data(show_spinner=False)
 def load_training_list() -> pd.DataFrame:
     """
-    Excelから種目リストを読み込む（キャッシュ）
-    ★重要：Excelが無い/壊れている場合でも、後段が落ちない列構成で返す
+    種目リスト（固定マスタ）
+    - B案：CSVを正として読む
+    - CSVが無い場合のみXLSXを保険で読む
+    - 読めなくても落ちない（必要列を必ず返す）
     """
     base_cols = ["種目名", "部位", "動画LINK", "動画開始時間(sec)", "必須/選択"]
-    out_cols = base_cols + ["DAY", "is_required", "video_embed_url", "video_watch_url"]
 
-    if not os.path.exists(XLSX_PATH):
-        # CloudでExcelが無い時に落ちないように、必要列を全部持った空DFを返す
-        return pd.DataFrame(columns=out_cols)
+    df = None
 
-    df = pd.read_excel(XLSX_PATH)
+    # 1) CSV
+    if os.path.exists(CSV_PATH):
+        try:
+            df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
+        except Exception:
+            df = None
 
-    # 列が違っても落ちない保険
+    # 2) XLSX（保険）
+    if df is None and os.path.exists(XLSX_PATH):
+        try:
+            df = pd.read_excel(XLSX_PATH)
+        except Exception:
+            df = None
+
+    # 3) どっちも無ければ空で返す（ただし必要列は持たせる）
+    if df is None:
+        df = pd.DataFrame(columns=base_cols)
+
+    # 想定列がないと落ちるので保険（列を追加）
     for col in base_cols:
         if col not in df.columns:
             df[col] = ""
 
     # 空白行除去
     df = df.dropna(subset=["種目名"]).copy()
-
-    # 型整形
     df["種目名"] = df["種目名"].astype(str).str.strip()
     df["部位"] = df["部位"].astype(str).str.strip()
     df["動画LINK"] = df["動画LINK"].astype(str).str.strip()
     df["必須/選択"] = df["必須/選択"].astype(str).str.strip()
 
-    # 開始秒（欠損は0）
+    # 開始秒を数値化（欠損は0）
     df["動画開始時間(sec)"] = pd.to_numeric(df["動画開始時間(sec)"], errors="coerce").fillna(0).astype(int)
 
-    # DAY付与
+    # DAY付与（必ず作る）
     df["DAY"] = df["部位"].map(PART_TO_DAY).fillna("OTHER")
 
-    # 必須判定（基本はExcelに従う）
+    # 必須判定（基本はマスタに従う）
     df["is_required"] = df["必須/選択"].isin(["必須", "Required", "REQ"])
 
-    # ★CHESTは全部必須に強制（3種しかない想定）
+    # CHESTは全部必須に強制（胸は少数想定）
     df.loc[df["DAY"] == "CHEST", "is_required"] = True
 
-    # YouTube URL（embed/watch）を生成
+    # YouTube URL（embed/watch）を必ず作る
     def _urls(row):
         d = build_youtube_urls(row["動画LINK"], row["動画開始時間(sec)"])
         return pd.Series([d["embed_url"], d["watch_url"]])
 
     df[["video_embed_url", "video_watch_url"]] = df.apply(_urls, axis=1)
 
-    # 後段が期待する列が必ずあるように揃える
-    for col in out_cols:
-        if col not in df.columns:
-            df[col] = ""
+    return df
 
-    return df[out_cols].copy()
-
-
+# ======================
+# 記録CSV（data.csv）
+# ======================
 def ensure_data():
     if not os.path.exists(DATA_PATH):
         df0 = pd.DataFrame(columns=["date", "weekday", "day", "item", "part", "done", "weight"])
         df0.to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
-
 
 def load_data():
     ensure_data()
     try:
         df = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
     except Exception:
+        # 壊れてたら作り直す
         try:
             os.remove(DATA_PATH)
         except Exception:
@@ -260,10 +271,8 @@ def load_data():
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
     return df
 
-
 def save_data(df: pd.DataFrame):
     df.to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
-
 
 def upsert_done_row(df: pd.DataFrame, d: date, weekday_key: str, day_key: str, name: str, part: str, done: bool):
     """同じ日付×DAY×種目があれば上書き、なければ追加"""
@@ -285,6 +294,7 @@ def upsert_done_row(df: pd.DataFrame, d: date, weekday_key: str, day_key: str, n
         df.loc[idx, "item"] = name
         df.loc[idx, "part"] = part
         df.loc[idx, "done"] = bool(done)
+        # weightは触らない
     else:
         new_row = {
             "date": d_str,
@@ -296,9 +306,7 @@ def upsert_done_row(df: pd.DataFrame, d: date, weekday_key: str, day_key: str, n
             "weight": None,
         }
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-
     return df
-
 
 # ======================
 # データロード
@@ -327,7 +335,7 @@ with st.expander("共通ルール（必読）", expanded=True):
         st.write(f"・{r}")
 
 # ======================
-# 毎日（共通）欄：A案（必ず表示）
+# 毎日（共通）
 # ======================
 st.header("毎日（共通）")
 
@@ -375,7 +383,7 @@ if daily_submitted:
 st.divider()
 
 # ----------------------
-# OFF（ストレッチ促し）
+# OFF
 # ----------------------
 if day_key == "OFF":
     st.info("今日はトレーニングは休み（回復日）です。**ストレッチ10〜15分だけは必ず**やりましょう。")
@@ -384,104 +392,98 @@ if day_key == "OFF":
 # トレ表示（子ども側）
 # ----------------------
 if day_key != "OFF":
-    # ExcelがCloudに無い場合でも落ちない
-    if "DAY" not in train_df.columns:
-        st.error("トレーニング一覧の読み込みに失敗しました（DAY列なし）。Excelの配置/列名を確認してください。")
+    # KeyError防止：必要列が無ければ空扱い
+    if train_df is None or train_df.empty or "DAY" not in train_df.columns:
+        st.warning("種目リスト（CSV/Excel）が読み込めていません。assets/trainings_list/trainings_list.csv を確認してください。")
+        today_items = pd.DataFrame()
     else:
         today_items = train_df[train_df["DAY"] == day_key].copy()
 
-        if today_items.empty:
-            # Excel未配置 or 部位表記の不一致
-            if not os.path.exists(XLSX_PATH):
-                st.error(
-                    "Excelが見つかりません。GitHubにExcelを追加してpushしてください。\n"
-                    "期待パス：assets/trainings_list/trainings_list.xlsx"
+    if today_items.empty:
+        st.error("このDAYに該当する種目がありません。CSVの「部位」表記が想定（背筋/胸/腹筋＋体幹など）になっているか確認してください。")
+    else:
+        st.header(DAY_TITLE.get(day_key, day_key))
+
+        required_df = today_items[today_items["is_required"]].copy() if "is_required" in today_items.columns else today_items.copy()
+        optional_df = today_items[~today_items["is_required"]].copy() if "is_required" in today_items.columns else pd.DataFrame()
+
+        # 追加種目を選ぶUI
+        optional_names = optional_df["種目名"].tolist() if not optional_df.empty else []
+        add_choice = None
+        if len(optional_names) > 0:
+            st.subheader("追加する種目（任意）")
+            add_choice = st.selectbox(
+                "今日は追加で1つやるなら選択（追加なしでもOK）",
+                ["追加なし"] + optional_names,
+                index=0,
+            )
+
+        display_rows = []
+        for _, r in required_df.iterrows():
+            display_rows.append(r)
+
+        if add_choice and add_choice != "追加なし":
+            add_row = optional_df[optional_df["種目名"] == add_choice]
+            if not add_row.empty:
+                display_rows.append(add_row.iloc[0])
+
+        with st.form(key=f"form_{selected_date}_{day_key}"):
+            checks = {}
+
+            for r in display_rows:
+                name = str(r.get("種目名", ""))
+                part = str(r.get("部位", ""))
+                tip = EX_TIPS.get(name, "")
+
+                embed_url = str(r.get("video_embed_url", "")).strip()
+                watch_url = str(r.get("video_watch_url", "")).strip()
+
+                badge = "【必須】" if bool(r.get("is_required", False)) else "【追加】"
+                st.subheader(f"{badge} {name}")
+
+                if tip:
+                    st.write(f"注意：{tip}")
+
+                # YouTube
+                if embed_url and is_youtube_url(watch_url or embed_url):
+                    st.video(embed_url)
+                    if watch_url:
+                        st.link_button("▶ YouTubeで開く", watch_url)
+                elif watch_url:
+                    st.link_button("▶ 動画/解説を見る（外部リンク）", watch_url)
+
+                checks[name] = {
+                    "done": st.checkbox("やった", value=False, key=f"chk_{selected_date}_{day_key}_{name}"),
+                    "part": part,
+                }
+
+                st.divider()
+
+            submitted = st.form_submit_button("このメニューを保存")
+
+        if submitted:
+            for name, v in checks.items():
+                df = upsert_done_row(
+                    df=df,
+                    d=selected_date,
+                    weekday_key=weekday_key,
+                    day_key=day_key,
+                    name=name,
+                    part=v["part"],
+                    done=v["done"],
                 )
+            save_data(df)
+            st.success("保存しました！")
+
+        st.divider()
+
+        # 参考：他の候補
+        with st.expander("他の候補（今日はやらなくてOK）", expanded=False):
+            if optional_df.empty:
+                st.write("（選択候補なし）")
             else:
-                st.error("このDAYに該当する種目がExcelにありません。Excelの「部位」表記を確認してください。")
-        else:
-            st.header(DAY_TITLE.get(day_key, day_key))
-
-            required_df = today_items[today_items["is_required"] == True].copy()
-            optional_df = today_items[today_items["is_required"] == False].copy()
-
-            # 追加種目を選ぶUI（任意）
-            optional_names = optional_df["種目名"].dropna().astype(str).tolist()
-            add_choice = None
-            if len(optional_names) > 0:
-                st.subheader("追加する種目（任意）")
-                add_choice = st.selectbox(
-                    "今日は追加で1つやるなら選択（追加なしでもOK）",
-                    ["追加なし"] + optional_names,
-                    index=0,
-                )
-
-            display_rows = []
-            for _, r in required_df.iterrows():
-                display_rows.append(r)
-
-            if add_choice and add_choice != "追加なし":
-                add_row = optional_df[optional_df["種目名"] == add_choice]
-                if not add_row.empty:
-                    display_rows.append(add_row.iloc[0])
-
-            with st.form(key=f"form_{selected_date}_{day_key}"):
-                checks = {}
-
-                for r in display_rows:
-                    name = str(r["種目名"])
-                    part = str(r["部位"])
-                    tip = EX_TIPS.get(name, "")
-
-                    embed_url = str(r.get("video_embed_url", "")).strip()
-                    watch_url = str(r.get("video_watch_url", "")).strip()
-
-                    badge = "【必須】" if bool(r["is_required"]) else "【追加】"
-                    st.subheader(f"{badge} {name}")
-
-                    if tip:
-                        st.write(f"注意：{tip}")
-
-                    # YouTubeは埋め込み（start=）＋リンク
-                    if embed_url and (is_youtube_url(watch_url) or is_youtube_url(embed_url)):
-                        st.video(embed_url)
-                        if watch_url:
-                            st.link_button("▶ YouTubeで開く（指定秒から）", watch_url)
-                    elif watch_url:
-                        st.link_button("▶ 動画/解説を見る（外部リンク）", watch_url)
-
-                    checks[name] = {
-                        "done": st.checkbox("やった", value=False, key=f"chk_{selected_date}_{day_key}_{name}"),
-                        "part": part,
-                    }
-
-                    st.divider()
-
-                submitted = st.form_submit_button("このメニューを保存")
-
-            if submitted:
-                for name, v in checks.items():
-                    df = upsert_done_row(
-                        df=df,
-                        d=selected_date,
-                        weekday_key=weekday_key,
-                        day_key=day_key,
-                        name=name,
-                        part=v["part"],
-                        done=v["done"],
-                    )
-                save_data(df)
-                st.success("保存しました！")
-
-            st.divider()
-
-            # 参考：他の候補
-            with st.expander("他の候補（今日はやらなくてOK）", expanded=False):
-                if optional_df.empty:
-                    st.write("（選択候補なし）")
-                else:
-                    for _, r in optional_df.iterrows():
-                        st.write(f"・{r['種目名']}（{r['部位']}）")
+                for _, r in optional_df.iterrows():
+                    st.write(f"・{r.get('種目名','')}（{r.get('部位','')}）")
 
     # 体重入力
     st.subheader("体重（kg）")
