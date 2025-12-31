@@ -1,398 +1,706 @@
-# app.py
-# FA期間中のトレーニング記録 (Sheets版)
-# - メニューは assets/trainings_list/trainings_list.csv から読み込み
-# - 記録は Google Sheets に append（失敗時は画面に理由を出す）
-# - Streamlit Secrets から service_account 情報と spreadsheet_id / worksheet_name を参照
-#
-# 必要パッケージ（requirements.txt）
-# streamlit
-# pandas
-# gspread
-# google-auth
-
-from __future__ import annotations
-
-import csv
-import datetime as dt
 import os
-import re
-from typing import Dict, List, Optional, Tuple
-
+import json
+from datetime import date
 import pandas as pd
 import streamlit as st
+from urllib.parse import urlparse, parse_qs
 
-# Sheets
+# ===== Sheets =====
 import gspread
 from google.oauth2.service_account import Credentials
 
+# ======================
+# ページ設定
+# ======================
+st.set_page_config(page_title="FA期間 自主トレチェック", layout="centered")
 
-# -----------------------------
-# 基本設定
-# -----------------------------
-APP_TITLE = "FA期間中のトレーニング記録（Sheets版）"
-MENU_CSV_PATH = "assets/trainings_list/trainings_list.csv"
+# ======================
+# CSS（文字サイズ調整）
+# ======================
+st.markdown(
+    """
+<style>
+html, body, [class*="css"]  { font-size: 20px !important; }
+h1 { font-size: 40px !important; }
+h2 { font-size: 30px !important; }
+h3 { font-size: 24px !important; }
+label, p, li, div { font-size: 20px !important; }
+a, button { font-size: 20px !important; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
-# Google Sheets API scope
-SCOPES = [
+# ======================
+# パス（ローカルCSV：Sheets NG時のフォールバック用）
+# ======================
+DATA_PATH = "data.csv"
+TRAININGS_DIR = "assets/trainings_list"
+TRAININGS_CSV_PATH = os.path.join(TRAININGS_DIR, "trainings_list.csv")   # CSV優先
+TRAININGS_XLSX_PATH = os.path.join(TRAININGS_DIR, "trainings_list.xlsx")  # 予備
+
+WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
+
+# ======================
+# 週間メニュー
+# ======================
+DAY_PLAN = {
+    "mon": "OFF",
+    "tue": "BACK",
+    "wed": "CORE",
+    "thu": "CHEST",
+    "fri": "BACK",
+    "sat": "CORE",
+    "sun": "CHEST",
+}
+
+DAY_TITLE = {
+    "BACK": "背中DAY（チューブ）",
+    "CHEST": "胸DAY（チューブ）",
+    "CORE": "腹・体幹DAY（チューブ）",
+    "OFF": "OFF（ストレッチのみ）",
+}
+
+# Excel/CSVの「部位」→DAYへの割当
+PART_TO_DAY = {
+    "背筋": "BACK",
+    "背中＋胸": "BACK",
+    "胸": "CHEST",
+    "腹筋＋体幹": "CORE",
+    "横腹": "CORE",
+    "体幹＋横腹": "CORE",
+}
+
+# ======================
+# 共通ルール
+# ======================
+COMMON_RULES = [
+    "各種目：12回 × 3セット（基本）",
+    "休憩：30〜45秒",
+    "テンポ：引っ張るときはできるだけ速く／戻すときは2秒かけてゆっくり",
+    "反動は使わない",
+    "必須は必ず実施。選択から追加して合計3〜4種目",
+]
+
+# 種目ごとの注意点
+EX_TIPS = {
+    "デッドリフト": "背中は一直線。腕で引かず、床を押すイメージ。",
+    "シーテッドローイング": "肩をすくめない。肘を後ろへ引いて肩甲骨を寄せる。",
+    "リバースシーテッドローイング": "肩をすくめない。肘を後ろへ、最後に肩甲骨。",
+    "リバースフライズ": "腕だけでなく、肩甲骨を動かして横に開く。",
+    "スクイーズバンド": "胸を張って背中を寄せる。首・肩に力を入れない。",
+    "プッシュアップ": "体は一直線。腰が落ちないように体幹を固める。",
+    "クロスオーバー": "胸を寄せる意識。肩が前に巻き込まれないように。",
+    "チェストプレス": "肩をすくめない。胸を張って前へ押し出す。",
+    "ニートゥチェスト": "反動NG。腹筋で膝を引き上げ、ゆっくり戻す。",
+    "サイドベンド": "体を横に倒しすぎない。横腹に効かせて戻す。",
+    "ウッドチョッパー": "体幹を固めて斜めに引き上げる。左右同じ回数。",
+}
+
+# ======================
+# 毎日（共通）
+# ======================
+DAILY_REQUIRED = [
+    {"name": "ボールタッチ（5分）", "part": "毎日・ボール", "tip": "軽めでOK。感覚維持が目的。"},
+]
+
+DAILY_OPTIONAL_BY_WEEKDAY = {
+    "mon": {"name": "ストレッチ（10〜15分）", "part": "毎日・回復", "tip": "頑張らない。回復優先。"},
+    "tue": {"name": "軽めラン（10分）", "part": "毎日・刺激", "tip": "息が上がらない強度で。"},
+    "wed": {"name": "縄跳び（3分）", "part": "毎日・刺激", "tip": "リズムよく。無理に追い込まない。"},
+    "thu": {"name": "散歩（10分）", "part": "毎日・回復", "tip": "回復目的。気分転換でOK。"},
+    "fri": {"name": "軽めラン（10分）", "part": "毎日・刺激", "tip": "疲労を残さないペースで。"},
+    "sat": {"name": "縄跳び（3分）", "part": "毎日・刺激", "tip": "短くOK。体を温める程度。"},
+    "sun": {"name": "散歩（10分）", "part": "毎日・回復", "tip": "回復優先。"},
+}
+
+# ======================
+# YouTube URL処理
+# ======================
+def extract_youtube_id(url: str) -> str:
+    if not isinstance(url, str) or not url.strip():
+        return ""
+    u = url.strip()
+    try:
+        parsed = urlparse(u)
+    except Exception:
+        return ""
+    host = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+
+    if "youtu.be" in host:
+        return path.lstrip("/").split("/")[0]
+
+    if "youtube.com" in host:
+        qs = parse_qs(parsed.query)
+        if "v" in qs and len(qs["v"]) > 0:
+            return qs["v"][0]
+        if "/embed/" in path:
+            return path.split("/embed/")[-1].split("/")[0]
+        if "/shorts/" in path:
+            return path.split("/shorts/")[-1].split("/")[0]
+    return ""
+
+def build_youtube_urls(url: str, start_sec: int) -> dict:
+    vid = extract_youtube_id(url)
+    s = int(start_sec) if start_sec and int(start_sec) > 0 else 0
+    if not vid:
+        return {"embed_url": "", "watch_url": (url or "").strip()}
+    embed = f"https://www.youtube.com/embed/{vid}"
+    watch = f"https://www.youtube.com/watch?v={vid}"
+    if s > 0:
+        embed = f"{embed}?start={s}"
+        watch = f"{watch}&t={s}s"
+    return {"embed_url": embed, "watch_url": watch}
+
+def is_youtube_url(url: str) -> bool:
+    return bool(extract_youtube_id(url))
+
+# ======================
+# 記録データ定義
+# ======================
+RECORD_COLUMNS = ["date", "weekday", "day", "item", "part", "done", "weight"]
+
+def normalize_record_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=RECORD_COLUMNS)
+
+    df2 = df.copy()
+
+    # 旧列名救済
+    if "day" not in df2.columns and "menu" in df2.columns:
+        df2.rename(columns={"menu": "day"}, inplace=True)
+    if "part" not in df2.columns and "category" in df2.columns:
+        df2.rename(columns={"category": "part"}, inplace=True)
+
+    # 欠け列補完
+    for c in RECORD_COLUMNS:
+        if c not in df2.columns:
+            df2[c] = None
+
+    # 型
+    try:
+        df2["done"] = df2["done"].astype("bool", errors="ignore")
+    except Exception:
+        pass
+    df2["weight"] = pd.to_numeric(df2["weight"], errors="coerce")
+    df2["date"] = pd.to_datetime(df2["date"], errors="coerce")
+
+    return df2[RECORD_COLUMNS]
+
+# ======================
+# 種目マスタ読み込み（CSV優先）
+# ======================
+@st.cache_data(show_spinner=False)
+def load_training_list() -> pd.DataFrame:
+    if not os.path.exists(TRAININGS_CSV_PATH) and not os.path.exists(TRAININGS_XLSX_PATH):
+        return pd.DataFrame(
+            columns=["種目名", "部位", "動画LINK", "動画開始時間(sec)", "必須/選択",
+                     "DAY", "is_required", "video_embed_url", "video_watch_url"]
+        )
+
+    if os.path.exists(TRAININGS_CSV_PATH):
+        try:
+            df = pd.read_csv(TRAININGS_CSV_PATH, encoding="utf-8-sig")
+        except Exception:
+            df = pd.read_csv(TRAININGS_CSV_PATH, encoding="utf-8")
+    else:
+        df = pd.read_excel(TRAININGS_XLSX_PATH)
+
+    for col in ["種目名", "部位", "動画LINK", "動画開始時間(sec)", "必須/選択"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    df = df.dropna(subset=["種目名"]).copy()
+    df["種目名"] = df["種目名"].astype(str).str.strip()
+    df["部位"] = df["部位"].astype(str).str.strip()
+    df["動画LINK"] = df["動画LINK"].astype(str).str.strip()
+    df["必須/選択"] = df["必須/選択"].astype(str).str.strip()
+    df["動画開始時間(sec)"] = pd.to_numeric(df["動画開始時間(sec)"], errors="coerce").fillna(0).astype(int)
+
+    df["DAY"] = df["部位"].map(PART_TO_DAY).fillna("OTHER")
+    df["is_required"] = df["必須/選択"].isin(["必須", "Required", "REQ"])
+    df.loc[df["DAY"] == "CHEST", "is_required"] = True  # CHESTは全部必須
+
+    def _urls(row):
+        d = build_youtube_urls(row["動画LINK"], row["動画開始時間(sec)"])
+        return pd.Series([d["embed_url"], d["watch_url"]])
+
+    df[["video_embed_url", "video_watch_url"]] = df.apply(_urls, axis=1)
+    return df
+
+# ======================
+# Sheets 接続・入出力
+# ======================
+SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
-
-# -----------------------------
-# ユーティリティ
-# -----------------------------
-def _now_jst() -> dt.datetime:
-    # Streamlit Cloud上ではUTCのことが多いので、表示だけJSTに寄せる
-    # （サーバ時刻がJSTならそのままでもOK）
-    return dt.datetime.utcnow() + dt.timedelta(hours=9)
-
-
-def _safe_str(x) -> str:
-    return "" if x is None else str(x)
-
-
-def _load_menu_csv(path: str) -> pd.DataFrame:
+def _get_service_account_info():
     """
-    trainings_list.csv を DataFrame で返す。
-    想定列:
-      - category / name / load / note ... など（何でもOK）
-    最低限、name列（または training 等）があれば動くようにする。
-    """
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=["name"])
-
-    # 文字化けしにくい順に試す
-    for enc in ("utf-8-sig", "utf-8", "cp932"):
-        try:
-            df = pd.read_csv(path, encoding=enc)
-            if len(df.columns) == 0:
-                continue
-            return df
-        except Exception:
-            continue
-
-    # 最後の手段
-    return pd.DataFrame(columns=["name"])
-
-
-def _menu_options(df: pd.DataFrame) -> List[str]:
-    # よくある列名を吸収
-    candidates = ["name", "training", "menu", "title"]
-    col = None
-    for c in candidates:
-        if c in df.columns:
-            col = c
-            break
-    if col is None:
-        # 先頭列を名前扱い
-        col = df.columns[0] if len(df.columns) else None
-
-    if col is None:
-        return []
-
-    opts = []
-    for v in df[col].fillna("").astype(str).tolist():
-        v = v.strip()
-        if v:
-            opts.append(v)
-    return opts
-
-
-def _normalize_private_key(pk: str) -> str:
-    """
-    Streamlit Secretsの貼り方によっては以下の崩れが起きる：
-    - \\n が文字として入っている（= 改行に戻す必要がある）
-    - 余計なダブルクォートが混ざる
-    - BEGIN/END周りに空白が混ざる
-    それらをできるだけ修復する。
-    """
-    if pk is None:
-        return ""
-
-    pk = str(pk)
-
-    # 余計な囲いが入ってたら除去
-    pk = pk.strip().strip('"').strip("'")
-
-    # literal \n を本当の改行へ
-    pk = pk.replace("\\n", "\n")
-
-    # BEGIN/END の前後に変な空白が入ることがあるので整形
-    pk = re.sub(r"-----BEGIN PRIVATE KEY-----\s*", "-----BEGIN PRIVATE KEY-----\n", pk)
-    pk = re.sub(r"\s*-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----", pk)
-
-    # 末尾改行が無いと嫌がるケースがあるので付ける
-    if not pk.endswith("\n"):
-        pk += "\n"
-
-    return pk
-
-
-def _build_service_account_info_from_secrets() -> Tuple[Optional[Dict], Optional[str]]:
-    """
-    st.secrets["gcp_service_account"] を from_service_account_info で使えるdictにする。
-    失敗時は (None, エラー文字列) を返す。
+    st.secrets の形式揺れを吸収して service_account dict を返す。
+    例:
+      [gcp_service_account] type="service_account" ... 形式
     """
     if "gcp_service_account" not in st.secrets:
-        return None, "st.secrets に [gcp_service_account] が見つかりません"
+        raise KeyError("Secrets に [gcp_service_account] がありません")
 
-    info = dict(st.secrets["gcp_service_account"])
+    info = st.secrets["gcp_service_account"]
 
-    # private_key を補正
-    if "private_key" in info:
-        info["private_key"] = _normalize_private_key(info["private_key"])
+    # もし JSON 文字列で入ってた場合
+    if isinstance(info, str):
+        info = json.loads(info)
 
-    # token_uri が無い場合に備える（JSONではだいたい入ってるが）
-    info.setdefault("token_uri", "https://oauth2.googleapis.com/token")
+    # private_key が \n のままの時は復元
+    if isinstance(info, dict) and "private_key" in info and isinstance(info["private_key"], str):
+        info["private_key"] = info["private_key"].replace("\\n", "\n")
 
-    # 必須キーざっくりチェック
-    required = ["type", "project_id", "private_key", "client_email", "token_uri"]
-    missing = [k for k in required if not info.get(k)]
-    if missing:
-        return None, f"service_account 情報の必須キーが不足: {missing}"
-
-    return info, None
-
+    return info
 
 @st.cache_resource(show_spinner=False)
-def _get_gspread_client() -> Tuple[Optional[gspread.Client], Optional[str]]:
-    """
-    Secretsから認証して gspread client を返す。
-    失敗時は (None, エラー文字列)
-    """
-    try:
-        info, err = _build_service_account_info_from_secrets()
-        if err:
-            return None, err
+def _connect_gspread():
+    info = _get_service_account_info()
+    creds = Credentials.from_service_account_info(info, scopes=SHEETS_SCOPES)
+    client = gspread.authorize(creds)
+    return client
 
-        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-        gc = gspread.authorize(creds)
-        return gc, None
-
-    except Exception as e:
-        # Incorrect padding 等もここに出る
-        return None, f"{type(e).__name__}: {e}"
-
-
-def _get_sheet_params() -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """
-    (spreadsheet_id, worksheet_name, err)
-    """
+def _get_sheet_ids():
     if "sheets" not in st.secrets:
-        return None, None, "st.secrets に [sheets] が見つかりません"
+        raise KeyError("Secrets に [sheets] がありません（spreadsheet_id / worksheet_name）")
+    ssid = st.secrets["sheets"].get("spreadsheet_id", "").strip()
+    wname = st.secrets["sheets"].get("worksheet_name", "").strip()
+    if not ssid:
+        raise ValueError("spreadsheet_id が空です")
+    if not wname:
+        raise ValueError("worksheet_name が空です")
+    return ssid, wname
 
-    sheets_cfg = st.secrets["sheets"]
-    spreadsheet_id = _safe_str(sheets_cfg.get("spreadsheet_id")).strip()
-    worksheet_name = _safe_str(sheets_cfg.get("worksheet_name", "log")).strip()
+def _open_worksheet(create_if_missing: bool = True):
+    client = _connect_gspread()
+    ssid, wname = _get_sheet_ids()
 
-    if not spreadsheet_id:
-        return None, None, "sheets.spreadsheet_id が空です"
-    if not worksheet_name:
-        worksheet_name = "log"
-
-    return spreadsheet_id, worksheet_name, None
-
-
-def _open_or_create_worksheet(
-    gc: gspread.Client,
-    spreadsheet_id: str,
-    worksheet_name: str,
-) -> Tuple[Optional[gspread.Worksheet], Optional[str]]:
-    """
-    ワークシートを開く。無ければ作る。
-    404/権限不足の時は原因が分かるメッセージを返す。
-    """
-    try:
-        sh = gc.open_by_key(spreadsheet_id)
-    except Exception as e:
-        msg = f"{type(e).__name__}: {e}"
-        # 404の多くは「共有されてない」か「ID違い」
-        hint = (
-            "\n\n【対処】\n"
-            "- spreadsheet_id が正しいか（URLの /d/ と /edit の間）\n"
-            "- スプレッドシートをサービスアカウント（client_email）に『編集者』で共有したか\n"
-        )
-        return None, msg + hint
+    # 404 対策：キーで開けない場合は URL/ID ミス or 共有不足の可能性大
+    sh = client.open_by_key(ssid)
 
     try:
-        ws = sh.worksheet(worksheet_name)
-        return ws, None
-    except gspread.WorksheetNotFound:
-        # 無ければ作る
-        try:
-            ws = sh.add_worksheet(title=worksheet_name, rows=2000, cols=20)
-            return ws, None
-        except Exception as e:
-            return None, f"{type(e).__name__}: {e}"
-
-
-def _ensure_header(ws: gspread.Worksheet, header: List[str]) -> None:
-    """
-    1行目が空ならヘッダーを書く（既にあれば何もしない）
-    """
-    try:
-        first_row = ws.row_values(1)
-        if len([c for c in first_row if str(c).strip()]) == 0:
-            ws.append_row(header, value_input_option="USER_ENTERED")
+        ws = sh.worksheet(wname)
     except Exception:
-        # ヘッダー失敗しても致命ではないので無視
-        pass
+        if not create_if_missing:
+            raise
+        ws = sh.add_worksheet(title=wname, rows=2000, cols=20)
+        # ヘッダー行を作る
+        ws.update([RECORD_COLUMNS])
+    return ws
 
+def _sheet_to_df(ws) -> pd.DataFrame:
+    values = ws.get_all_values()
+    if not values:
+        return pd.DataFrame(columns=RECORD_COLUMNS)
 
-def _append_log_row(ws: gspread.Worksheet, row: List[str]) -> Tuple[bool, str]:
-    """
-    append_row して成功/失敗を返す
-    """
-    try:
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        return True, "OK"
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+    header = values[0]
+    rows = values[1:]
 
-
-def _read_recent(ws: gspread.Worksheet, limit: int = 50) -> pd.DataFrame:
-    """
-    直近の行を読み込んでDataFrame化（重いので必要最小限）
-    """
-    try:
-        values = ws.get_all_values()
-        if not values:
-            return pd.DataFrame()
-        header = values[0]
-        body = values[1:]
-        if not body:
-            return pd.DataFrame(columns=header)
-        tail = body[-limit:]
-        return pd.DataFrame(tail, columns=header)
-    except Exception:
-        return pd.DataFrame()
-
-
-# -----------------------------
-# UI
-# -----------------------------
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-
-st.title(APP_TITLE)
-
-left, main = st.columns([1, 3], gap="large")
-
-with left:
-    st.subheader("設定 / 状態")
-
-    # メニュー読み込み
-    menu_df = _load_menu_csv(MENU_CSV_PATH)
-    menu_opts = _menu_options(menu_df)
-
-    st.caption("Sheets から読み書きします。エラーが出たら Secrets/共有権限 を確認。")
-
-    # Sheets接続チェック
-    gc, gc_err = _get_gspread_client()
-    spreadsheet_id, worksheet_name, sheets_err = _get_sheet_params()
-
-    if gc_err:
-        st.error("Google Sheets 接続NG")
-        st.code(gc_err)
-        ws = None
-    elif sheets_err:
-        st.error("Google Sheets 接続NG")
-        st.code(sheets_err)
-        ws = None
+    # ヘッダーが想定外なら作り直しに近い処理（落とさない）
+    if header != RECORD_COLUMNS:
+        # 可能なら header を優先して読み込む
+        df = pd.DataFrame(rows, columns=header)
     else:
-        ws, ws_err = _open_or_create_worksheet(gc, spreadsheet_id, worksheet_name)
-        if ws_err:
-            st.error("Google Sheets 接続NG")
-            st.code(ws_err)
-        else:
-            st.success("Google Sheets 接続OK")
-            st.caption(f"Spreadsheet: {spreadsheet_id}")
-            st.caption(f"Worksheet: {worksheet_name}")
+        df = pd.DataFrame(rows, columns=RECORD_COLUMNS)
 
-            # headerを保証
-            _ensure_header(
-                ws,
-                header=[
-                    "timestamp_jst",
-                    "date",
-                    "time",
-                    "menu",
-                    "duration_min",
-                    "intensity",
-                    "memo",
-                ],
-            )
+    # done/weight/date の型を整える
+    if "done" in df.columns:
+        df["done"] = df["done"].astype(str).str.lower().isin(["true", "1", "yes", "y", "t"])
+    if "weight" in df.columns:
+        df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+    return normalize_record_df(df)
+
+def _df_to_sheet(ws, df: pd.DataFrame):
+    df = normalize_record_df(df)
+
+    out = df.copy()
+    # date を文字列保存
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    out["done"] = out["done"].fillna(False).astype(bool)
+
+    values = [RECORD_COLUMNS] + out[RECORD_COLUMNS].astype(str).values.tolist()
+
+    ws.clear()
+    ws.update(values)
+
+# ======================
+# ローカルCSV（フォールバック）
+# ======================
+def ensure_data_local():
+    if not os.path.exists(DATA_PATH):
+        pd.DataFrame(columns=RECORD_COLUMNS).to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
+
+def load_data_local():
+    ensure_data_local()
+    try:
+        raw = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
+    except Exception:
+        raw = pd.read_csv(DATA_PATH, encoding="utf-8")
+    return normalize_record_df(raw)
+
+def save_data_local(df: pd.DataFrame):
+    out = normalize_record_df(df).copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    out.to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
+
+# ======================
+# ストレージ抽象化（Sheets優先・NGならCSV）
+# ======================
+class Storage:
+    def __init__(self):
+        self.mode = "CSV"
+        self.ws = None
+        self.last_error = None
+
+    def connect(self):
+        try:
+            self.ws = _open_worksheet(create_if_missing=True)
+            # 軽く読めるか確認
+            _ = self.ws.row_values(1)
+            self.mode = "SHEETS"
+            self.last_error = None
+        except Exception as e:
+            self.mode = "CSV"
+            self.ws = None
+            self.last_error = e
+
+    def load(self) -> pd.DataFrame:
+        if self.mode == "SHEETS" and self.ws is not None:
+            return _sheet_to_df(self.ws)
+        return load_data_local()
+
+    def save(self, df: pd.DataFrame):
+        if self.mode == "SHEETS" and self.ws is not None:
+            _df_to_sheet(self.ws, df)
+        else:
+            save_data_local(df)
+
+storage = Storage()
+storage.connect()
+
+# ======================
+# 便利：Upsert
+# ======================
+def upsert_done_row(df: pd.DataFrame, d: date, weekday_key: str, day_key: str, name: str, part: str, done: bool):
+    df = normalize_record_df(df)
+    d_str = d.strftime("%Y-%m-%d")
+
+    df2 = df.copy()
+    df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    mask = (df2["date_str"] == d_str) & (df2["day"] == day_key) & (df2["item"] == name)
+
+    if mask.any():
+        idx = df2[mask].index[0]
+        df.loc[idx, "date"] = d_str
+        df.loc[idx, "weekday"] = weekday_key
+        df.loc[idx, "day"] = day_key
+        df.loc[idx, "item"] = name
+        df.loc[idx, "part"] = part
+        df.loc[idx, "done"] = bool(done)
+    else:
+        new_row = {
+            "date": d_str,
+            "weekday": weekday_key,
+            "day": day_key,
+            "item": name,
+            "part": part,
+            "done": bool(done),
+            "weight": None,
+        }
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+    return normalize_record_df(df)
+
+def upsert_weight(df: pd.DataFrame, d: date, weekday_key: str, weight_val: float):
+    df = normalize_record_df(df)
+    d_str = d.strftime("%Y-%m-%d")
+
+    df2 = df.copy()
+    df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    mask = (df2["date_str"] == d_str) & (df2["day"] == "WEIGHT") & (df2["item"] == "weight")
+
+    if mask.any():
+        idx = df2[mask].index[0]
+        df.loc[idx, "date"] = d_str
+        df.loc[idx, "weekday"] = weekday_key
+        df.loc[idx, "day"] = "WEIGHT"
+        df.loc[idx, "item"] = "weight"
+        df.loc[idx, "part"] = "body"
+        df.loc[idx, "done"] = True
+        df.loc[idx, "weight"] = float(weight_val)
+    else:
+        new_row = {
+            "date": d_str,
+            "weekday": weekday_key,
+            "day": "WEIGHT",
+            "item": "weight",
+            "part": "body",
+            "done": True,
+            "weight": float(weight_val),
+        }
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+    return normalize_record_df(df)
+
+def get_saved_done(df: pd.DataFrame, d: date, day_key: str, item_name: str) -> bool:
+    df = normalize_record_df(df)
+    d_str = d.strftime("%Y-%m-%d")
+    df2 = df.copy()
+    df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    mask = (df2["date_str"] == d_str) & (df2["day"] == day_key) & (df2["item"] == item_name)
+    if mask.any():
+        v = df2.loc[df2[mask].index[0], "done"]
+        return bool(v)
+    return False
+
+def get_saved_weight(df: pd.DataFrame, d: date):
+    df = normalize_record_df(df)
+    d_str = d.strftime("%Y-%m-%d")
+    df2 = df.copy()
+    df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    mask = (df2["date_str"] == d_str) & (df2["day"] == "WEIGHT") & (df2["item"] == "weight")
+    if mask.any():
+        v = df2.loc[df2[mask].index[0], "weight"]
+        try:
+            return float(v)
+        except Exception:
+            return None
+    return None
+
+# ======================
+# データロード
+# ======================
+train_df = load_training_list()
+df = storage.load()
+
+# ======================
+# サイドバー：接続状態
+# ======================
+with st.sidebar:
+    st.subheader("設定 / 状態")
+    st.write("Sheets から読み書きします。エラーが出たら Secrets/共有権限 を確認。")
+
+    if storage.mode == "SHEETS":
+        st.success("Google Sheets 接続OK")
+        try:
+            ssid, wname = _get_sheet_ids()
+            st.caption(f"spreadsheet_id: {ssid}")
+            st.caption(f"worksheet: {wname}")
+        except Exception:
+            pass
+    else:
+        st.error("Google Sheets 接続NG（CSVにフォールバック）")
+        if storage.last_error is not None:
+            st.code(str(storage.last_error))
 
     st.divider()
     st.subheader("メニュー一覧（CSV）")
-    st.caption(f"{len(menu_opts)} 件読み込み")
-    if len(menu_opts) > 0:
-        st.write(menu_opts[:30] if len(menu_opts) > 30 else menu_opts)
+    st.caption(f"{len(train_df)} 件読み込み")
+
+# ======================
+# UI（ここから：更新前の形を維持）
+# ======================
+st.title("FA期間 自主トレチェック")
+
+parent_view = st.toggle("親ビュー（集計）", value=False)
+
+selected_date = st.date_input("日付を選択", value=date.today())
+weekday_idx = selected_date.weekday()
+weekday_key = WEEKDAY_KEYS[weekday_idx]
+weekday_jp = WEEKDAY_JP[weekday_idx]
+
+day_key = DAY_PLAN.get(weekday_key, "OFF")
+st.write(f"{weekday_jp}曜日｜メニュー：{DAY_TITLE.get(day_key, day_key)}")
+
+with st.expander("共通ルール（必読）", expanded=True):
+    for r in COMMON_RULES:
+        st.write(f"・{r}")
+
+# ======================
+# 毎日（共通）
+# ======================
+st.header("毎日（共通）")
+
+daily_optional = DAILY_OPTIONAL_BY_WEEKDAY.get(weekday_key)
+daily_rows = []
+daily_rows.extend(DAILY_REQUIRED)
+if daily_optional:
+    daily_rows.append(daily_optional)
+
+with st.form(key=f"form_daily_{selected_date}"):
+    daily_checks = {}
+
+    for item in daily_rows:
+        name = item["name"]
+        part = item["part"]
+        tip = item.get("tip", "")
+
+        badge = "【必須】" if item in DAILY_REQUIRED else "【任意】"
+        st.subheader(f"{badge} {name}")
+        if tip:
+            st.write(f"注意：{tip}")
+
+        default_done = get_saved_done(df, selected_date, "DAILY", name)
+
+        daily_checks[name] = {
+            "done": st.checkbox("やった", value=default_done, key=f"chk_{selected_date}_DAILY_{name}"),
+            "part": part,
+        }
+        st.divider()
+
+    daily_submitted = st.form_submit_button("毎日メニューを保存")
+
+if daily_submitted:
+    for name, v in daily_checks.items():
+        df = upsert_done_row(
+            df=df,
+            d=selected_date,
+            weekday_key=weekday_key,
+            day_key="DAILY",
+            name=name,
+            part=v["part"],
+            done=v["done"],
+        )
+    storage.save(df)
+    st.success("毎日メニューを保存しました！")
+
+st.divider()
+
+# OFF
+if day_key == "OFF":
+    st.info("今日はOFF（回復日）です。**ストレッチ10〜15分だけは必ず**やりましょう。")
+
+# トレ表示
+if day_key != "OFF":
+    today_items = train_df[train_df["DAY"] == day_key].copy()
+
+    if today_items.empty:
+        st.error("このDAYに該当する種目がマスタにありません。マスタの「部位」表記を確認してください。")
     else:
-        st.warning("メニューCSVが空、または列が認識できません。")
+        st.header(DAY_TITLE.get(day_key, day_key))
 
-with main:
-    st.header("記録入力")
+        required_df = today_items[today_items["is_required"]].copy()
+        optional_df = today_items[~today_items["is_required"]].copy()
 
-    now = _now_jst()
-    col1, col2, col3 = st.columns([1, 1, 2])
+        optional_names = optional_df["種目名"].tolist()
+        add_choice = None
+        if len(optional_names) > 0:
+            st.subheader("追加する種目（任意）")
+            add_choice = st.selectbox(
+                "今日は追加で1つやるなら選択（追加なしでもOK）",
+                ["追加なし"] + optional_names,
+                index=0,
+            )
 
-    with col1:
-        date_val = st.date_input("日付", value=now.date())
-        time_val = st.time_input("時間", value=now.time().replace(second=0, microsecond=0))
+        display_rows = []
+        for _, r in required_df.iterrows():
+            display_rows.append(r)
 
-    with col2:
-        duration_min = st.number_input("時間（分）", min_value=0, max_value=1000, value=60, step=5)
-        intensity = st.selectbox("強度", ["軽め", "普通", "きつい", "限界"], index=1)
+        if add_choice and add_choice != "追加なし":
+            add_row = optional_df[optional_df["種目名"] == add_choice]
+            if not add_row.empty:
+                display_rows.append(add_row.iloc[0])
 
-    with col3:
-        if menu_opts:
-            menu = st.selectbox("メニュー", menu_opts, index=0)
-        else:
-            menu = st.text_input("メニュー（手入力）", value="")
+        with st.form(key=f"form_{selected_date}_{day_key}"):
+            checks = {}
 
-        memo = st.text_area("メモ（任意）", height=120, placeholder="例：フォーム意識、疲労感、痛み、天候など")
+            for r in display_rows:
+                name = str(r["種目名"])
+                part = str(r["部位"])
+                tip = EX_TIPS.get(name, "")
 
-    st.divider()
+                embed_url = str(r.get("video_embed_url", "")).strip()
+                watch_url = str(r.get("video_watch_url", "")).strip()
 
-    btn_col1, btn_col2 = st.columns([1, 2])
-    with btn_col1:
-        do_save = st.button("Sheetsに保存", type="primary", use_container_width=True)
-    with btn_col2:
-        st.caption("保存できない場合：①Secretsのprivate_key改行崩れ（Incorrect padding） ②共有権限不足（404） ③spreadsheet_id/worksheet_name違い を確認")
+                badge = "【必須】" if bool(r["is_required"]) else "【追加】"
+                st.subheader(f"{badge} {name}")
 
-    if do_save:
-        if ws is None:
-            st.error("Sheetsに接続できていないので保存できません（左のエラーを確認）")
-        else:
-            timestamp_jst = _now_jst().strftime("%Y-%m-%d %H:%M:%S")
-            row = [
-                timestamp_jst,
-                date_val.strftime("%Y-%m-%d"),
-                time_val.strftime("%H:%M"),
-                _safe_str(menu).strip(),
-                str(int(duration_min)),
-                _safe_str(intensity),
-                _safe_str(memo).strip(),
-            ]
-            ok, msg = _append_log_row(ws, row)
-            if ok:
-                st.success("保存しました ✅")
-            else:
-                st.error("保存に失敗しました ❌")
-                st.code(msg)
-                st.info(
-                    "【よくある原因】\n"
-                    "- 404: スプレッドシートをサービスアカウントに共有してない / spreadsheet_id間違い\n"
-                    "- Incorrect padding: Secrets内private_keyの改行崩れ\n"
+                if tip:
+                    st.write(f"注意：{tip}")
+
+                if embed_url and is_youtube_url(watch_url or embed_url):
+                    st.video(embed_url)
+                    if watch_url:
+                        st.link_button("▶ YouTubeで開く（指定秒から）", watch_url)
+                elif watch_url:
+                    st.link_button("▶ 動画/解説を見る（外部リンク）", watch_url)
+
+                default_done = get_saved_done(df, selected_date, day_key, name)
+
+                checks[name] = {
+                    "done": st.checkbox("やった", value=default_done, key=f"chk_{selected_date}_{day_key}_{name}"),
+                    "part": part,
+                }
+
+                st.divider()
+
+            submitted = st.form_submit_button("このメニューを保存")
+
+        if submitted:
+            for name, v in checks.items():
+                df = upsert_done_row(
+                    df=df,
+                    d=selected_date,
+                    weekday_key=weekday_key,
+                    day_key=day_key,
+                    name=name,
+                    part=v["part"],
+                    done=v["done"],
                 )
+            storage.save(df)
+            st.success("保存しました！")
 
-    st.subheader("最近の記録（Sheets）")
-    if ws is None:
-        st.info("Sheets接続がOKになったらここに表示されます。")
+        st.divider()
+
+        with st.expander("他の候補（今日はやらなくてOK）", expanded=False):
+            if optional_df.empty:
+                st.write("（選択候補なし）")
+            else:
+                for _, r in optional_df.iterrows():
+                    st.write(f"・{r['種目名']}（{r['部位']}）")
+
+    # 体重入力（保存済みがあれば初期値に反映）
+    st.subheader("体重（kg）")
+    saved_w = get_saved_weight(df, selected_date)
+    init_w = saved_w if saved_w is not None else 55.0
+
+    weight = st.number_input("今日の体重", min_value=30.0, max_value=90.0, step=0.1, value=float(init_w))
+
+    if st.button("体重を保存"):
+        df = upsert_weight(df, selected_date, weekday_key, float(weight))
+        storage.save(df)
+        st.success("体重を保存しました！")
+
+# 親ビュー（集計）
+if parent_view:
+    st.divider()
+    st.header("体重推移")
+
+    df = normalize_record_df(df)
+    weight_df = df.dropna(subset=["weight"]).copy()
+    if not weight_df.empty:
+        weight_df["date"] = pd.to_datetime(weight_df["date"], errors="coerce")
+        weight_df = weight_df.dropna(subset=["date"]).sort_values("date")
+        st.line_chart(weight_df.set_index("date")["weight"])
     else:
-        recent_df = _read_recent(ws, limit=50)
-        if recent_df.empty:
-            st.info("まだ記録がありません。")
+        st.info("まだ体重データがありません。")
+
+    st.header("トレ実施数（部位別）")
+    done_df = df[df["done"] == True].copy()
+    if not done_df.empty:
+        part_df = done_df.groupby("part").size()
+        if not part_df.empty:
+            st.bar_chart(part_df)
         else:
-            st.dataframe(recent_df, use_container_width=True)
+            st.info("まだトレ記録がありません。")
+    else:
+        st.info("まだトレ記録がありません。")
