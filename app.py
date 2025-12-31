@@ -1,360 +1,398 @@
 # app.py
-# ------------------------------------------------------------
-# FA期間中のトレーニング記録（Google Sheets 版）
+# FA期間中のトレーニング記録 (Sheets版)
+# - メニューは assets/trainings_list/trainings_list.csv から読み込み
+# - 記録は Google Sheets に append（失敗時は画面に理由を出す）
+# - Streamlit Secrets から service_account 情報と spreadsheet_id / worksheet_name を参照
 #
-# - Streamlit Cloud の Secrets に、以下を設定している前提：
-#   [gcp_service_account] ・・・サービスアカウントJSONの中身（TOML形式）
-#   [sheets]
-#   spreadsheet_id = "..."
-#   worksheet_name = "log"
-#
-# - シート「log」には 1行目にヘッダ行があり、列名でマッピングします。
-#   （ヘッダが無い/違う場合も、下の EXPECTED_COLUMNS に合わせて自動整形します）
-#
-# - trainings_list は assets/trainings_list/trainings_list.csv を参照（任意）
-# ------------------------------------------------------------
+# 必要パッケージ（requirements.txt）
+# streamlit
+# pandas
+# gspread
+# google-auth
 
-import os
+from __future__ import annotations
+
+import csv
 import datetime as dt
-from typing import List, Dict, Any, Optional
+import os
+import re
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
-# Google Sheets
+# Sheets
 import gspread
 from google.oauth2.service_account import Credentials
 
 
-# ========= 設定 =========
+# -----------------------------
+# 基本設定
+# -----------------------------
 APP_TITLE = "FA期間中のトレーニング記録（Sheets版）"
-TRAININGS_CSV_PATH = "assets/trainings_list/trainings_list.csv"
+MENU_CSV_PATH = "assets/trainings_list/trainings_list.csv"
 
-# 期待する列（Sheets側のヘッダ行として整形）
-# 既にヘッダがある場合は、それに合わせて読みます。
-EXPECTED_COLUMNS = [
-    "date",          # YYYY-MM-DD
-    "weekday",       # Mon/Tue...
-    "week_id",       # ISO week number
-    "rec_id",        # 連番
-    "day",           # 任意（Day1 等）
-    "weight",        # 体重
-    "trainings",     # 選択したメニュー（|区切り）
-    "memo",          # メモ
-    "timestamp",     # 保存時刻（ISO）
+# Google Sheets API scope
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
 
 
-# ========= ユーティリティ =========
-def iso_week_id(d: dt.date) -> int:
-    return int(d.isocalendar().week)
-
-def weekday_str(d: dt.date) -> str:
-    return d.strftime("%a")  # Mon, Tue...
-
-def now_iso() -> str:
-    return dt.datetime.now().replace(microsecond=0).isoformat(sep=" ")
-
-def safe_float(x) -> Optional[float]:
-    try:
-        if x is None:
-            return None
-        s = str(x).strip()
-        if s == "":
-            return None
-        return float(s)
-    except Exception:
-        return None
-
-def parse_date(x) -> Optional[dt.date]:
-    if x is None:
-        return None
-    s = str(x).strip()
-    if not s:
-        return None
-    # Google Sheets から date が datetime っぽく来る/文字列で来る両対応
-    try:
-        if isinstance(x, dt.date) and not isinstance(x, dt.datetime):
-            return x
-        if isinstance(x, dt.datetime):
-            return x.date()
-        return dt.date.fromisoformat(s[:10])
-    except Exception:
-        return None
+# -----------------------------
+# ユーティリティ
+# -----------------------------
+def _now_jst() -> dt.datetime:
+    # Streamlit Cloud上ではUTCのことが多いので、表示だけJSTに寄せる
+    # （サーバ時刻がJSTならそのままでもOK）
+    return dt.datetime.utcnow() + dt.timedelta(hours=9)
 
 
-# ========= Trainings CSV =========
-@st.cache_data(show_spinner=False)
-def load_trainings_master() -> List[str]:
+def _safe_str(x) -> str:
+    return "" if x is None else str(x)
+
+
+def _load_menu_csv(path: str) -> pd.DataFrame:
     """
-    assets/trainings_list/trainings_list.csv からメニュー一覧を読み込みます。
-    形式は以下どれでもOK：
-    - 1列だけ（列名あり/なし）
-    - 'training' 列を含む
+    trainings_list.csv を DataFrame で返す。
+    想定列:
+      - category / name / load / note ... など（何でもOK）
+    最低限、name列（または training 等）があれば動くようにする。
     """
-    if not os.path.exists(TRAININGS_CSV_PATH):
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["name"])
+
+    # 文字化けしにくい順に試す
+    for enc in ("utf-8-sig", "utf-8", "cp932"):
+        try:
+            df = pd.read_csv(path, encoding=enc)
+            if len(df.columns) == 0:
+                continue
+            return df
+        except Exception:
+            continue
+
+    # 最後の手段
+    return pd.DataFrame(columns=["name"])
+
+
+def _menu_options(df: pd.DataFrame) -> List[str]:
+    # よくある列名を吸収
+    candidates = ["name", "training", "menu", "title"]
+    col = None
+    for c in candidates:
+        if c in df.columns:
+            col = c
+            break
+    if col is None:
+        # 先頭列を名前扱い
+        col = df.columns[0] if len(df.columns) else None
+
+    if col is None:
         return []
 
-    try:
-        df = pd.read_csv(TRAININGS_CSV_PATH)
-        if df.shape[1] == 0:
-            return []
-        # 列名が training の場合を優先
-        if "training" in df.columns:
-            items = df["training"].dropna().astype(str).tolist()
-        else:
-            # 先頭列を採用
-            items = df.iloc[:, 0].dropna().astype(str).tolist()
-        # 空/重複除去
-        items = [x.strip() for x in items if str(x).strip()]
-        items = sorted(list(dict.fromkeys(items)))
-        return items
-    except Exception:
-        return []
+    opts = []
+    for v in df[col].fillna("").astype(str).tolist():
+        v = v.strip()
+        if v:
+            opts.append(v)
+    return opts
 
 
-# ========= Google Sheets 接続 =========
-def get_gspread_client() -> gspread.Client:
+def _normalize_private_key(pk: str) -> str:
     """
-    st.secrets["gcp_service_account"] を使って gspread クライアントを作成
+    Streamlit Secretsの貼り方によっては以下の崩れが起きる：
+    - \\n が文字として入っている（= 改行に戻す必要がある）
+    - 余計なダブルクォートが混ざる
+    - BEGIN/END周りに空白が混ざる
+    それらをできるだけ修復する。
+    """
+    if pk is None:
+        return ""
+
+    pk = str(pk)
+
+    # 余計な囲いが入ってたら除去
+    pk = pk.strip().strip('"').strip("'")
+
+    # literal \n を本当の改行へ
+    pk = pk.replace("\\n", "\n")
+
+    # BEGIN/END の前後に変な空白が入ることがあるので整形
+    pk = re.sub(r"-----BEGIN PRIVATE KEY-----\s*", "-----BEGIN PRIVATE KEY-----\n", pk)
+    pk = re.sub(r"\s*-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----", pk)
+
+    # 末尾改行が無いと嫌がるケースがあるので付ける
+    if not pk.endswith("\n"):
+        pk += "\n"
+
+    return pk
+
+
+def _build_service_account_info_from_secrets() -> Tuple[Optional[Dict], Optional[str]]:
+    """
+    st.secrets["gcp_service_account"] を from_service_account_info で使えるdictにする。
+    失敗時は (None, エラー文字列) を返す。
     """
     if "gcp_service_account" not in st.secrets:
-        raise RuntimeError("Streamlit Secrets に [gcp_service_account] が見つかりません。")
+        return None, "st.secrets に [gcp_service_account] が見つかりません"
 
-    sa_info = dict(st.secrets["gcp_service_account"])
+    info = dict(st.secrets["gcp_service_account"])
 
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
-    return gspread.authorize(creds)
+    # private_key を補正
+    if "private_key" in info:
+        info["private_key"] = _normalize_private_key(info["private_key"])
 
-def open_worksheet() -> gspread.Worksheet:
-    if "sheets" not in st.secrets:
-        raise RuntimeError("Streamlit Secrets に [sheets] が見つかりません。")
-    spreadsheet_id = st.secrets["sheets"].get("spreadsheet_id")
-    worksheet_name = st.secrets["sheets"].get("worksheet_name", "log")
-    if not spreadsheet_id:
-        raise RuntimeError("Secrets の [sheets].spreadsheet_id が空です。")
+    # token_uri が無い場合に備える（JSONではだいたい入ってるが）
+    info.setdefault("token_uri", "https://oauth2.googleapis.com/token")
 
-    gc = get_gspread_client()
-    sh = gc.open_by_key(spreadsheet_id)
-    ws = sh.worksheet(worksheet_name)
-    return ws
-
-def ensure_header(ws: gspread.Worksheet, expected_cols: List[str]) -> List[str]:
-    """
-    1行目がヘッダならそれを返す。空なら expected_cols を書き込む。
-    ヘッダが一部欠けている場合は「既存 + 追加」で揃える。
-    """
-    first_row = ws.row_values(1)
-    if not first_row or all(str(x).strip() == "" for x in first_row):
-        ws.update("A1", [expected_cols])
-        return expected_cols
-
-    header = [str(x).strip() for x in first_row]
-    # 既存ヘッダが expected を満たさない場合は追記して揃える
-    missing = [c for c in expected_cols if c not in header]
+    # 必須キーざっくりチェック
+    required = ["type", "project_id", "private_key", "client_email", "token_uri"]
+    missing = [k for k in required if not info.get(k)]
     if missing:
-        new_header = header + missing
-        ws.update("A1", [new_header])
-        return new_header
-    return header
+        return None, f"service_account 情報の必須キーが不足: {missing}"
 
-@st.cache_data(show_spinner=False, ttl=15)
-def fetch_logs() -> pd.DataFrame:
+    return info, None
+
+
+@st.cache_resource(show_spinner=False)
+def _get_gspread_client() -> Tuple[Optional[gspread.Client], Optional[str]]:
     """
-    Sheets から全行を DataFrame で取得（ヘッダ行込み）。
+    Secretsから認証して gspread client を返す。
+    失敗時は (None, エラー文字列)
     """
-    ws = open_worksheet()
-    header = ensure_header(ws, EXPECTED_COLUMNS)
-
-    values = ws.get_all_values()
-    if len(values) <= 1:
-        return pd.DataFrame(columns=header)
-
-    df = pd.DataFrame(values[1:], columns=header)
-
-    # 型整形
-    if "date" in df.columns:
-        df["date"] = df["date"].apply(parse_date)
-    if "week_id" in df.columns:
-        df["week_id"] = pd.to_numeric(df["week_id"], errors="coerce").astype("Int64")
-    if "rec_id" in df.columns:
-        df["rec_id"] = pd.to_numeric(df["rec_id"], errors="coerce").astype("Int64")
-    if "weight" in df.columns:
-        df["weight"] = df["weight"].apply(safe_float)
-
-    # 並び
-    if "date" in df.columns:
-        df = df.sort_values(by=["date", "rec_id"], ascending=[False, False], na_position="last")
-
-    return df
-
-def get_next_rec_id(df: pd.DataFrame) -> int:
-    if df is None or df.empty or "rec_id" not in df.columns:
-        return 1
-    s = df["rec_id"].dropna()
-    if s.empty:
-        return 1
     try:
-        return int(s.max()) + 1
+        info, err = _build_service_account_info_from_secrets()
+        if err:
+            return None, err
+
+        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+        gc = gspread.authorize(creds)
+        return gc, None
+
+    except Exception as e:
+        # Incorrect padding 等もここに出る
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _get_sheet_params() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    (spreadsheet_id, worksheet_name, err)
+    """
+    if "sheets" not in st.secrets:
+        return None, None, "st.secrets に [sheets] が見つかりません"
+
+    sheets_cfg = st.secrets["sheets"]
+    spreadsheet_id = _safe_str(sheets_cfg.get("spreadsheet_id")).strip()
+    worksheet_name = _safe_str(sheets_cfg.get("worksheet_name", "log")).strip()
+
+    if not spreadsheet_id:
+        return None, None, "sheets.spreadsheet_id が空です"
+    if not worksheet_name:
+        worksheet_name = "log"
+
+    return spreadsheet_id, worksheet_name, None
+
+
+def _open_or_create_worksheet(
+    gc: gspread.Client,
+    spreadsheet_id: str,
+    worksheet_name: str,
+) -> Tuple[Optional[gspread.Worksheet], Optional[str]]:
+    """
+    ワークシートを開く。無ければ作る。
+    404/権限不足の時は原因が分かるメッセージを返す。
+    """
+    try:
+        sh = gc.open_by_key(spreadsheet_id)
+    except Exception as e:
+        msg = f"{type(e).__name__}: {e}"
+        # 404の多くは「共有されてない」か「ID違い」
+        hint = (
+            "\n\n【対処】\n"
+            "- spreadsheet_id が正しいか（URLの /d/ と /edit の間）\n"
+            "- スプレッドシートをサービスアカウント（client_email）に『編集者』で共有したか\n"
+        )
+        return None, msg + hint
+
+    try:
+        ws = sh.worksheet(worksheet_name)
+        return ws, None
+    except gspread.WorksheetNotFound:
+        # 無ければ作る
+        try:
+            ws = sh.add_worksheet(title=worksheet_name, rows=2000, cols=20)
+            return ws, None
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+
+
+def _ensure_header(ws: gspread.Worksheet, header: List[str]) -> None:
+    """
+    1行目が空ならヘッダーを書く（既にあれば何もしない）
+    """
+    try:
+        first_row = ws.row_values(1)
+        if len([c for c in first_row if str(c).strip()]) == 0:
+            ws.append_row(header, value_input_option="USER_ENTERED")
     except Exception:
-        return 1
-
-def append_log_row(row: Dict[str, Any]) -> None:
-    ws = open_worksheet()
-    header = ensure_header(ws, EXPECTED_COLUMNS)
-
-    # ヘッダ順に並べて追記
-    out = []
-    for col in header:
-        v = row.get(col, "")
-        # date を YYYY-MM-DD に
-        if isinstance(v, dt.date):
-            v = v.isoformat()
-        out.append("" if v is None else str(v))
-    ws.append_row(out, value_input_option="USER_ENTERED")
+        # ヘッダー失敗しても致命ではないので無視
+        pass
 
 
-# ========= UI =========
+def _append_log_row(ws: gspread.Worksheet, row: List[str]) -> Tuple[bool, str]:
+    """
+    append_row して成功/失敗を返す
+    """
+    try:
+        ws.append_row(row, value_input_option="USER_ENTERED")
+        return True, "OK"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _read_recent(ws: gspread.Worksheet, limit: int = 50) -> pd.DataFrame:
+    """
+    直近の行を読み込んでDataFrame化（重いので必要最小限）
+    """
+    try:
+        values = ws.get_all_values()
+        if not values:
+            return pd.DataFrame()
+        header = values[0]
+        body = values[1:]
+        if not body:
+            return pd.DataFrame(columns=header)
+        tail = body[-limit:]
+        return pd.DataFrame(tail, columns=header)
+    except Exception:
+        return pd.DataFrame()
+
+
+# -----------------------------
+# UI
+# -----------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
+
 st.title(APP_TITLE)
 
-with st.sidebar:
-    st.subheader("設定 / 状態")
-    st.caption("Sheets から読み書きします。エラーが出たら Secrets/共有権限を確認。")
+left, main = st.columns([1, 3], gap="large")
 
-    # 接続チェック
-    ok = True
-    try:
-        _ws = open_worksheet()
-        st.success("Google Sheets 接続OK")
-        st.caption(f"sheet: {_ws.title}")
-    except Exception as e:
-        ok = False
+with left:
+    st.subheader("設定 / 状態")
+
+    # メニュー読み込み
+    menu_df = _load_menu_csv(MENU_CSV_PATH)
+    menu_opts = _menu_options(menu_df)
+
+    st.caption("Sheets から読み書きします。エラーが出たら Secrets/共有権限 を確認。")
+
+    # Sheets接続チェック
+    gc, gc_err = _get_gspread_client()
+    spreadsheet_id, worksheet_name, sheets_err = _get_sheet_params()
+
+    if gc_err:
         st.error("Google Sheets 接続NG")
-        st.code(str(e))
+        st.code(gc_err)
+        ws = None
+    elif sheets_err:
+        st.error("Google Sheets 接続NG")
+        st.code(sheets_err)
+        ws = None
+    else:
+        ws, ws_err = _open_or_create_worksheet(gc, spreadsheet_id, worksheet_name)
+        if ws_err:
+            st.error("Google Sheets 接続NG")
+            st.code(ws_err)
+        else:
+            st.success("Google Sheets 接続OK")
+            st.caption(f"Spreadsheet: {spreadsheet_id}")
+            st.caption(f"Worksheet: {worksheet_name}")
+
+            # headerを保証
+            _ensure_header(
+                ws,
+                header=[
+                    "timestamp_jst",
+                    "date",
+                    "time",
+                    "menu",
+                    "duration_min",
+                    "intensity",
+                    "memo",
+                ],
+            )
 
     st.divider()
     st.subheader("メニュー一覧（CSV）")
-    trainings_master = load_trainings_master()
-    if trainings_master:
-        st.caption(f"{len(trainings_master)} 件読み込み")
+    st.caption(f"{len(menu_opts)} 件読み込み")
+    if len(menu_opts) > 0:
+        st.write(menu_opts[:30] if len(menu_opts) > 30 else menu_opts)
     else:
-        st.caption("CSVが無い/読めない場合は手入力でもOK")
+        st.warning("メニューCSVが空、または列が認識できません。")
 
+with main:
+    st.header("記録入力")
 
-if not ok:
-    st.stop()
-
-# データ取得
-df = fetch_logs()
-next_id = get_next_rec_id(df)
-
-# タブ
-tab_add, tab_view, tab_weight = st.tabs(["➕ 記録する", "📋 履歴を見る", "📈 体重推移"])
-
-# ========== 記録する ==========
-with tab_add:
-    col1, col2 = st.columns([1, 1], gap="large")
+    now = _now_jst()
+    col1, col2, col3 = st.columns([1, 1, 2])
 
     with col1:
-        st.subheader("基本情報")
-        d = st.date_input("日付", value=dt.date.today())
-        weekday = weekday_str(d)
-        week_id = iso_week_id(d)
-
-        st.text_input("曜日（自動）", value=weekday, disabled=True)
-        st.number_input("week_id（自動: ISO週）", value=int(week_id), step=1, disabled=True)
-
-        rec_id = st.number_input("rec_id（自動）", value=int(next_id), step=1)
-        day_label = st.text_input("day（任意）", value="")
-
-        weight = st.number_input("体重（kg）", value=0.0, step=0.1, format="%.1f")
+        date_val = st.date_input("日付", value=now.date())
+        time_val = st.time_input("時間", value=now.time().replace(second=0, microsecond=0))
 
     with col2:
-        st.subheader("トレーニング内容")
-        if trainings_master:
-            selected = st.multiselect("メニュー（複数選択）", trainings_master)
-            trainings_text = " | ".join(selected)
-            st.text_input("trainings（保存形式）", value=trainings_text, disabled=True)
+        duration_min = st.number_input("時間（分）", min_value=0, max_value=1000, value=60, step=5)
+        intensity = st.selectbox("強度", ["軽め", "普通", "きつい", "限界"], index=1)
+
+    with col3:
+        if menu_opts:
+            menu = st.selectbox("メニュー", menu_opts, index=0)
         else:
-            trainings_text = st.text_input("trainings（自由入力）", value="")
+            menu = st.text_input("メニュー（手入力）", value="")
 
-        memo = st.text_area("memo（任意）", value="", height=180)
+        memo = st.text_area("メモ（任意）", height=120, placeholder="例：フォーム意識、疲労感、痛み、天候など")
 
-        st.divider()
-        if st.button("✅ 保存（Sheetsに追記）", type="primary", use_container_width=True):
-            row = {
-                "date": d.isoformat(),
-                "weekday": weekday,
-                "week_id": week_id,
-                "rec_id": rec_id,
-                "day": day_label,
-                "weight": weight if weight > 0 else "",
-                "trainings": trainings_text,
-                "memo": memo,
-                "timestamp": now_iso(),
-            }
-            try:
-                append_log_row(row)
-                # キャッシュ更新
-                fetch_logs.clear()
-                st.success("保存しました！")
-                st.rerun()
-            except Exception as e:
-                st.error("保存に失敗しました")
-                st.code(str(e))
+    st.divider()
 
-# ========== 履歴を見る ==========
-with tab_view:
-    st.subheader("記録一覧")
+    btn_col1, btn_col2 = st.columns([1, 2])
+    with btn_col1:
+        do_save = st.button("Sheetsに保存", type="primary", use_container_width=True)
+    with btn_col2:
+        st.caption("保存できない場合：①Secretsのprivate_key改行崩れ（Incorrect padding） ②共有権限不足（404） ③spreadsheet_id/worksheet_name違い を確認")
 
-    # フィルタ
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        from_date = st.date_input("From", value=(dt.date.today() - dt.timedelta(days=30)))
-    with c2:
-        to_date = st.date_input("To", value=dt.date.today())
-    with c3:
-        kw = st.text_input("キーワード（trainings/memo）", value="")
+    if do_save:
+        if ws is None:
+            st.error("Sheetsに接続できていないので保存できません（左のエラーを確認）")
+        else:
+            timestamp_jst = _now_jst().strftime("%Y-%m-%d %H:%M:%S")
+            row = [
+                timestamp_jst,
+                date_val.strftime("%Y-%m-%d"),
+                time_val.strftime("%H:%M"),
+                _safe_str(menu).strip(),
+                str(int(duration_min)),
+                _safe_str(intensity),
+                _safe_str(memo).strip(),
+            ]
+            ok, msg = _append_log_row(ws, row)
+            if ok:
+                st.success("保存しました ✅")
+            else:
+                st.error("保存に失敗しました ❌")
+                st.code(msg)
+                st.info(
+                    "【よくある原因】\n"
+                    "- 404: スプレッドシートをサービスアカウントに共有してない / spreadsheet_id間違い\n"
+                    "- Incorrect padding: Secrets内private_keyの改行崩れ\n"
+                )
 
-    view_df = df.copy()
-    if "date" in view_df.columns:
-        view_df = view_df[view_df["date"].notna()]
-        view_df = view_df[(view_df["date"] >= from_date) & (view_df["date"] <= to_date)]
-
-    if kw.strip():
-        k = kw.strip().lower()
-        cols = [c for c in ["trainings", "memo"] if c in view_df.columns]
-        if cols:
-            mask = False
-            for c in cols:
-                mask = mask | view_df[c].fillna("").astype(str).str.lower().str.contains(k)
-            view_df = view_df[mask]
-
-    st.dataframe(view_df, use_container_width=True, height=520)
-
-    st.caption("※ 編集・削除は安全のためこの版では未実装（必要なら実装するよ）。")
-
-# ========== 体重推移 ==========
-with tab_weight:
-    st.subheader("体重推移（入力がある日だけ）")
-    if df.empty or "date" not in df.columns or "weight" not in df.columns:
-        st.info("体重データがまだありません。")
+    st.subheader("最近の記録（Sheets）")
+    if ws is None:
+        st.info("Sheets接続がOKになったらここに表示されます。")
     else:
-        wdf = df[["date", "weight"]].copy()
-        wdf = wdf[wdf["date"].notna()]
-        wdf = wdf[wdf["weight"].notna()]
-        wdf = wdf.sort_values("date", ascending=True)
-
-        if wdf.empty:
-            st.info("体重が入力された行がありません。")
+        recent_df = _read_recent(ws, limit=50)
+        if recent_df.empty:
+            st.info("まだ記録がありません。")
         else:
-            st.line_chart(wdf.set_index("date")["weight"])
-
-            # 最新
-            latest = wdf.iloc[-1]
-            st.metric("最新の体重", f"{latest['weight']:.1f} kg", help=f"日付: {latest['date']}")
+            st.dataframe(recent_df, use_container_width=True)
