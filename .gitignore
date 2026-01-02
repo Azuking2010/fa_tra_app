@@ -1,0 +1,10 @@
+data.csv
+data.csv.tmp
+__pycache__/
+*.pyc
+.venv/
+
+# secrets
+assets/google_key/
+*.json
+
