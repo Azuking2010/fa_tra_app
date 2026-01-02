@@ -12,8 +12,18 @@ def render_daily(st, storage, selected_date: date_type, weekday_key: str):
         daily_rows.append(daily_optional)
 
     # 縄跳びのときだけメトロノームUIを出す
-    is_rope_day = daily_optional and ("縄跳び" in daily_optional.get("name", "")) and (weekday_key in ["wed", "sat"])
+    is_rope_day = (
+        daily_optional
+        and ("縄跳び" in daily_optional.get("name", ""))
+        and (weekday_key in ["wed", "sat"])
+    )
 
+    # ✅ ここを「フォームの外」に出す（超重要）
+    if is_rope_day:
+        with st.expander("リズム機能を使う（60秒×3セット推奨）", expanded=False):
+            render_metronome_ui(st, key_prefix=f"rope_{selected_date}")
+
+    # ✅ フォームは「チェック＆保存」だけにする
     with st.form(key=f"form_daily_{selected_date}"):
         daily_checks = {}
 
@@ -27,11 +37,6 @@ def render_daily(st, storage, selected_date: date_type, weekday_key: str):
             if tip:
                 st.write(f"注意：{tip}")
 
-            # 縄跳びの日だけ「リズム機能」案内
-            if is_rope_day and ("縄跳び" in name):
-                with st.expander("リズム機能を使う（60秒×3セット推奨）", expanded=False):
-                    render_metronome_ui(st, key_prefix=f"rope_{selected_date}")
-
             daily_checks[name] = {
                 "done": st.checkbox("やった", value=False, key=f"chk_{selected_date}_DAILY_{name}"),
                 "part": part,
@@ -44,7 +49,7 @@ def render_daily(st, storage, selected_date: date_type, weekday_key: str):
         rows = []
         d_str = selected_date.strftime("%Y-%m-%d")
 
-        # ✅ done=True のものだけ追記（ログが汚れない）
+        # done=True のものだけ追記
         for name, v in daily_checks.items():
             if v["done"]:
                 rows.append({
