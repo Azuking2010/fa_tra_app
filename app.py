@@ -1,13 +1,11 @@
 import os
-import json
 from datetime import date
 import pandas as pd
 import streamlit as st
 from urllib.parse import urlparse, parse_qs
 
-# ===== Sheets =====
-import gspread
-from google.oauth2.service_account import Credentials
+# ★追加：別ファイルのメトロノーム
+from metronome_component import render_jump_rope_metronome, calc_target_jumps
 
 # ======================
 # ページ設定
@@ -32,18 +30,25 @@ a, button { font-size: 20px !important; }
 )
 
 # ======================
-# パス（ローカルCSV：Sheets NG時のフォールバック用）
+# パス
 # ======================
 DATA_PATH = "data.csv"
 TRAININGS_DIR = "assets/trainings_list"
-TRAININGS_CSV_PATH = os.path.join(TRAININGS_DIR, "trainings_list.csv")   # CSV優先
-TRAININGS_XLSX_PATH = os.path.join(TRAININGS_DIR, "trainings_list.xlsx")  # 予備
+TRAININGS_CSV_PATH = os.path.join(TRAININGS_DIR, "trainings_list.csv")   # ★B案：CSV優先
+TRAININGS_XLSX_PATH = os.path.join(TRAININGS_DIR, "trainings_list.xlsx")  # 予備（無ければCSVだけでOK）
 
 WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
 # ======================
-# 週間メニュー
+# 週間メニュー（FA期間の基本：更新版）
+# 月：OFF（ストレッチのみ）
+# 火：背中
+# 水：腹
+# 木：胸
+# 金：背中
+# 土：腹
+# 日：胸
 # ======================
 DAY_PLAN = {
     "mon": "OFF",
@@ -62,7 +67,7 @@ DAY_TITLE = {
     "OFF": "OFF（ストレッチのみ）",
 }
 
-# Excel/CSVの「部位」→DAYへの割当
+# Excel/CSVの「部位」→DAYへの割当（マスタの値に合わせる）
 PART_TO_DAY = {
     "背筋": "BACK",
     "背中＋胸": "BACK",
@@ -73,7 +78,7 @@ PART_TO_DAY = {
 }
 
 # ======================
-# 共通ルール
+# 共通ルール（UI表示用）
 # ======================
 COMMON_RULES = [
     "各種目：12回 × 3セット（基本）",
@@ -83,7 +88,7 @@ COMMON_RULES = [
     "必須は必ず実施。選択から追加して合計3〜4種目",
 ]
 
-# 種目ごとの注意点
+# 種目ごとの「注意点（超短文）」
 EX_TIPS = {
     "デッドリフト": "背中は一直線。腕で引かず、床を押すイメージ。",
     "シーテッドローイング": "肩をすくめない。肘を後ろへ引いて肩甲骨を寄せる。",
@@ -99,7 +104,7 @@ EX_TIPS = {
 }
 
 # ======================
-# 毎日（共通）
+# 毎日（共通）メニュー：A案（継続）
 # ======================
 DAILY_REQUIRED = [
     {"name": "ボールタッチ（5分）", "part": "毎日・ボール", "tip": "軽めでOK。感覚維持が目的。"},
@@ -116,91 +121,138 @@ DAILY_OPTIONAL_BY_WEEKDAY = {
 }
 
 # ======================
-# YouTube URL処理
+# メトロノーム設定（UI要件）
+# - 時間：60/120/180（デフォルト60）
+# - 間隔：0.50 / 0.46 / 0.42 / 0.40
+#   表示：標準 / やや早 / 早い / 高速
+# ======================
+METRO_DURATIONS = [60, 120, 180]
+METRO_INTERVALS = [
+    ("標準", 0.50),
+    ("やや早", 0.46),
+    ("早い", 0.42),
+    ("高速", 0.40),
+]
+
+def is_jump_rope_day(weekday_key: str) -> bool:
+    return weekday_key in ["wed", "sat"]
+
+def is_jump_rope_item_name(name: str) -> bool:
+    return "縄跳び" in (name or "")
+
+# ======================
+# YouTube URL処理（開始秒を確実化）
 # ======================
 def extract_youtube_id(url: str) -> str:
+    """YouTubeのURLから動画IDを抽出。取れなければ空文字。"""
     if not isinstance(url, str) or not url.strip():
         return ""
     u = url.strip()
+
     try:
         parsed = urlparse(u)
     except Exception:
         return ""
+
     host = (parsed.netloc or "").lower()
     path = parsed.path or ""
 
     if "youtu.be" in host:
-        return path.lstrip("/").split("/")[0]
+        vid = path.lstrip("/").split("/")[0]
+        return vid
 
     if "youtube.com" in host:
         qs = parse_qs(parsed.query)
         if "v" in qs and len(qs["v"]) > 0:
             return qs["v"][0]
+
         if "/embed/" in path:
             return path.split("/embed/")[-1].split("/")[0]
+
         if "/shorts/" in path:
             return path.split("/shorts/")[-1].split("/")[0]
+
     return ""
 
 def build_youtube_urls(url: str, start_sec: int) -> dict:
+    """
+    YouTubeなら
+    - embed_url: st.videoで開始秒が効く形式
+    - watch_url: 外部で開いても開始秒が効きやすい形式
+    を返す。YouTubeでなければ元URLをwatch_urlに入れて返す。
+    """
     vid = extract_youtube_id(url)
     s = int(start_sec) if start_sec and int(start_sec) > 0 else 0
+
     if not vid:
         return {"embed_url": "", "watch_url": (url or "").strip()}
+
     embed = f"https://www.youtube.com/embed/{vid}"
     watch = f"https://www.youtube.com/watch?v={vid}"
+
     if s > 0:
         embed = f"{embed}?start={s}"
         watch = f"{watch}&t={s}s"
+
     return {"embed_url": embed, "watch_url": watch}
 
 def is_youtube_url(url: str) -> bool:
     return bool(extract_youtube_id(url))
 
 # ======================
-# 記録データ定義
+# 便利：列の安全確保（KeyError防止）
 # ======================
 RECORD_COLUMNS = ["date", "weekday", "day", "item", "part", "done", "weight"]
 
 def normalize_record_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    旧data.csv（menu/category）でも動くように正規化。
+    - menu -> day
+    - category -> part
+    """
     if df is None or df.empty:
         return pd.DataFrame(columns=RECORD_COLUMNS)
 
     df2 = df.copy()
 
-    # 旧列名救済
+    # 旧列名の救済
     if "day" not in df2.columns and "menu" in df2.columns:
         df2.rename(columns={"menu": "day"}, inplace=True)
     if "part" not in df2.columns and "category" in df2.columns:
         df2.rename(columns={"category": "part"}, inplace=True)
 
-    # 欠け列補完
+    # 足りない列を追加
     for c in RECORD_COLUMNS:
         if c not in df2.columns:
             df2[c] = None
 
-    # 型
-    try:
-        df2["done"] = df2["done"].astype("bool", errors="ignore")
-    except Exception:
-        pass
-    df2["weight"] = pd.to_numeric(df2["weight"], errors="coerce")
-    df2["date"] = pd.to_datetime(df2["date"], errors="coerce")
+    # 型の整形
+    df2["done"] = df2["done"].astype("bool", errors="ignore") if "done" in df2.columns else False
+    df2["weight"] = pd.to_numeric(df2["weight"], errors="coerce") if "weight" in df2.columns else None
+
+    # dateはdatetime化しても、保存は文字列にする（後段で扱う）
+    if "date" in df2.columns and not df2.empty:
+        df2["date"] = pd.to_datetime(df2["date"], errors="coerce")
 
     return df2[RECORD_COLUMNS]
 
 # ======================
-# 種目マスタ読み込み（CSV優先）
+# 種目マスタ読み込み（CSV優先：B案）
 # ======================
 @st.cache_data(show_spinner=False)
 def load_training_list() -> pd.DataFrame:
+    """
+    種目マスタを読み込む。
+    優先順位：CSV（trainings_list.csv）→ XLSX（trainings_list.xlsx）
+    """
+    # どちらも無ければ空
     if not os.path.exists(TRAININGS_CSV_PATH) and not os.path.exists(TRAININGS_XLSX_PATH):
         return pd.DataFrame(
-            columns=["種目名", "部位", "動画LINK", "動画開始時間(sec)", "必須/選択",
-                     "DAY", "is_required", "video_embed_url", "video_watch_url"]
+            columns=["種目名", "部位", "動画LINK", "動画開始時間(sec)", "必須/選択", "DAY", "is_required", "video_embed_url", "video_watch_url"]
         )
 
     if os.path.exists(TRAININGS_CSV_PATH):
+        # CSVはExcel経由だと BOM 付きになることがあるので utf-8-sig を優先
         try:
             df = pd.read_csv(TRAININGS_CSV_PATH, encoding="utf-8-sig")
         except Exception:
@@ -208,194 +260,84 @@ def load_training_list() -> pd.DataFrame:
     else:
         df = pd.read_excel(TRAININGS_XLSX_PATH)
 
+    # 想定列がないと落ちるので保険
     for col in ["種目名", "部位", "動画LINK", "動画開始時間(sec)", "必須/選択"]:
         if col not in df.columns:
             df[col] = ""
 
+    # 空白行除去
     df = df.dropna(subset=["種目名"]).copy()
     df["種目名"] = df["種目名"].astype(str).str.strip()
     df["部位"] = df["部位"].astype(str).str.strip()
     df["動画LINK"] = df["動画LINK"].astype(str).str.strip()
     df["必須/選択"] = df["必須/選択"].astype(str).str.strip()
+
+    # 開始秒を数値化（欠損は0）
     df["動画開始時間(sec)"] = pd.to_numeric(df["動画開始時間(sec)"], errors="coerce").fillna(0).astype(int)
 
+    # DAY付与
     df["DAY"] = df["部位"].map(PART_TO_DAY).fillna("OTHER")
-    df["is_required"] = df["必須/選択"].isin(["必須", "Required", "REQ"])
-    df.loc[df["DAY"] == "CHEST", "is_required"] = True  # CHESTは全部必須
 
+    # 必須判定（基本はマスタに従う）
+    df["is_required"] = df["必須/選択"].isin(["必須", "Required", "REQ"])
+
+    # ★CHESTは全部必須に強制（種目数が少ない想定）
+    df.loc[df["DAY"] == "CHEST", "is_required"] = True
+
+    # YouTube URL（embed/watch）を生成
     def _urls(row):
         d = build_youtube_urls(row["動画LINK"], row["動画開始時間(sec)"])
         return pd.Series([d["embed_url"], d["watch_url"]])
 
     df[["video_embed_url", "video_watch_url"]] = df.apply(_urls, axis=1)
+
     return df
 
 # ======================
-# Sheets 接続・入出力
+# 記録データ（data.csv）
 # ======================
-SHEETS_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
-def _get_service_account_info():
-    """
-    st.secrets の形式揺れを吸収して service_account dict を返す。
-    例:
-      [gcp_service_account] type="service_account" ... 形式
-    """
-    if "gcp_service_account" not in st.secrets:
-        raise KeyError("Secrets に [gcp_service_account] がありません")
-
-    info = st.secrets["gcp_service_account"]
-
-    # もし JSON 文字列で入ってた場合
-    if isinstance(info, str):
-        info = json.loads(info)
-
-    # private_key が \n のままの時は復元
-    if isinstance(info, dict) and "private_key" in info and isinstance(info["private_key"], str):
-        info["private_key"] = info["private_key"].replace("\\n", "\n")
-
-    return info
-
-@st.cache_resource(show_spinner=False)
-def _connect_gspread():
-    info = _get_service_account_info()
-    creds = Credentials.from_service_account_info(info, scopes=SHEETS_SCOPES)
-    client = gspread.authorize(creds)
-    return client
-
-def _get_sheet_ids():
-    if "sheets" not in st.secrets:
-        raise KeyError("Secrets に [sheets] がありません（spreadsheet_id / worksheet_name）")
-    ssid = st.secrets["sheets"].get("spreadsheet_id", "").strip()
-    wname = st.secrets["sheets"].get("worksheet_name", "").strip()
-    if not ssid:
-        raise ValueError("spreadsheet_id が空です")
-    if not wname:
-        raise ValueError("worksheet_name が空です")
-    return ssid, wname
-
-def _open_worksheet(create_if_missing: bool = True):
-    client = _connect_gspread()
-    ssid, wname = _get_sheet_ids()
-
-    # 404 対策：キーで開けない場合は URL/ID ミス or 共有不足の可能性大
-    sh = client.open_by_key(ssid)
-
-    try:
-        ws = sh.worksheet(wname)
-    except Exception:
-        if not create_if_missing:
-            raise
-        ws = sh.add_worksheet(title=wname, rows=2000, cols=20)
-        # ヘッダー行を作る
-        ws.update([RECORD_COLUMNS])
-    return ws
-
-def _sheet_to_df(ws) -> pd.DataFrame:
-    values = ws.get_all_values()
-    if not values:
-        return pd.DataFrame(columns=RECORD_COLUMNS)
-
-    header = values[0]
-    rows = values[1:]
-
-    # ヘッダーが想定外なら作り直しに近い処理（落とさない）
-    if header != RECORD_COLUMNS:
-        # 可能なら header を優先して読み込む
-        df = pd.DataFrame(rows, columns=header)
-    else:
-        df = pd.DataFrame(rows, columns=RECORD_COLUMNS)
-
-    # done/weight/date の型を整える
-    if "done" in df.columns:
-        df["done"] = df["done"].astype(str).str.lower().isin(["true", "1", "yes", "y", "t"])
-    if "weight" in df.columns:
-        df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-
-    return normalize_record_df(df)
-
-def _df_to_sheet(ws, df: pd.DataFrame):
-    df = normalize_record_df(df)
-
-    out = df.copy()
-    # date を文字列保存
-    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    out["done"] = out["done"].fillna(False).astype(bool)
-
-    values = [RECORD_COLUMNS] + out[RECORD_COLUMNS].astype(str).values.tolist()
-
-    ws.clear()
-    ws.update(values)
-
-# ======================
-# ローカルCSV（フォールバック）
-# ======================
-def ensure_data_local():
+def ensure_data():
     if not os.path.exists(DATA_PATH):
-        pd.DataFrame(columns=RECORD_COLUMNS).to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
+        df0 = pd.DataFrame(columns=RECORD_COLUMNS)
+        df0.to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
 
-def load_data_local():
-    ensure_data_local()
+def load_data():
+    ensure_data()
     try:
         raw = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
     except Exception:
-        raw = pd.read_csv(DATA_PATH, encoding="utf-8")
-    return normalize_record_df(raw)
+        try:
+            raw = pd.read_csv(DATA_PATH, encoding="utf-8")
+        except Exception:
+            # 壊れてたら作り直す
+            try:
+                os.remove(DATA_PATH)
+            except Exception:
+                pass
+            ensure_data()
+            raw = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
 
-def save_data_local(df: pd.DataFrame):
-    out = normalize_record_df(df).copy()
-    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    df = normalize_record_df(raw)
+    return df
+
+def save_data(df: pd.DataFrame):
+    # 保存は文字列に落とす（Excelで見ても分かりやすく）
+    out = df.copy()
+    if "date" in out.columns and not out.empty:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     out.to_csv(DATA_PATH, index=False, encoding="utf-8-sig")
 
-# ======================
-# ストレージ抽象化（Sheets優先・NGならCSV）
-# ======================
-class Storage:
-    def __init__(self):
-        self.mode = "CSV"
-        self.ws = None
-        self.last_error = None
-
-    def connect(self):
-        try:
-            self.ws = _open_worksheet(create_if_missing=True)
-            # 軽く読めるか確認
-            _ = self.ws.row_values(1)
-            self.mode = "SHEETS"
-            self.last_error = None
-        except Exception as e:
-            self.mode = "CSV"
-            self.ws = None
-            self.last_error = e
-
-    def load(self) -> pd.DataFrame:
-        if self.mode == "SHEETS" and self.ws is not None:
-            return _sheet_to_df(self.ws)
-        return load_data_local()
-
-    def save(self, df: pd.DataFrame):
-        if self.mode == "SHEETS" and self.ws is not None:
-            _df_to_sheet(self.ws, df)
-        else:
-            save_data_local(df)
-
-storage = Storage()
-storage.connect()
-
-# ======================
-# 便利：Upsert
-# ======================
 def upsert_done_row(df: pd.DataFrame, d: date, weekday_key: str, day_key: str, name: str, part: str, done: bool):
+    """
+    同じ日付×DAY×種目があれば上書き、なければ追加
+    """
     df = normalize_record_df(df)
+
     d_str = d.strftime("%Y-%m-%d")
 
     df2 = df.copy()
     df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
     mask = (df2["date_str"] == d_str) & (df2["day"] == day_key) & (df2["item"] == name)
 
     if mask.any():
@@ -406,6 +348,7 @@ def upsert_done_row(df: pd.DataFrame, d: date, weekday_key: str, day_key: str, n
         df.loc[idx, "item"] = name
         df.loc[idx, "part"] = part
         df.loc[idx, "done"] = bool(done)
+        # weightは触らない
     else:
         new_row = {
             "date": d_str,
@@ -420,94 +363,26 @@ def upsert_done_row(df: pd.DataFrame, d: date, weekday_key: str, day_key: str, n
 
     return normalize_record_df(df)
 
-def upsert_weight(df: pd.DataFrame, d: date, weekday_key: str, weight_val: float):
-    df = normalize_record_df(df)
-    d_str = d.strftime("%Y-%m-%d")
-
-    df2 = df.copy()
-    df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    mask = (df2["date_str"] == d_str) & (df2["day"] == "WEIGHT") & (df2["item"] == "weight")
-
-    if mask.any():
-        idx = df2[mask].index[0]
-        df.loc[idx, "date"] = d_str
-        df.loc[idx, "weekday"] = weekday_key
-        df.loc[idx, "day"] = "WEIGHT"
-        df.loc[idx, "item"] = "weight"
-        df.loc[idx, "part"] = "body"
-        df.loc[idx, "done"] = True
-        df.loc[idx, "weight"] = float(weight_val)
-    else:
-        new_row = {
-            "date": d_str,
-            "weekday": weekday_key,
-            "day": "WEIGHT",
-            "item": "weight",
-            "part": "body",
-            "done": True,
-            "weight": float(weight_val),
-        }
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-
-    return normalize_record_df(df)
-
-def get_saved_done(df: pd.DataFrame, d: date, day_key: str, item_name: str) -> bool:
-    df = normalize_record_df(df)
-    d_str = d.strftime("%Y-%m-%d")
-    df2 = df.copy()
-    df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    mask = (df2["date_str"] == d_str) & (df2["day"] == day_key) & (df2["item"] == item_name)
-    if mask.any():
-        v = df2.loc[df2[mask].index[0], "done"]
-        return bool(v)
-    return False
-
-def get_saved_weight(df: pd.DataFrame, d: date):
-    df = normalize_record_df(df)
-    d_str = d.strftime("%Y-%m-%d")
-    df2 = df.copy()
-    df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    mask = (df2["date_str"] == d_str) & (df2["day"] == "WEIGHT") & (df2["item"] == "weight")
-    if mask.any():
-        v = df2.loc[df2[mask].index[0], "weight"]
-        try:
-            return float(v)
-        except Exception:
-            return None
-    return None
-
 # ======================
 # データロード
 # ======================
 train_df = load_training_list()
-df = storage.load()
+df = load_data()
 
 # ======================
-# サイドバー：接続状態
+# Session State（メトロノームUI表示制御）
 # ======================
-with st.sidebar:
-    st.subheader("設定 / 状態")
-    st.write("Sheets から読み書きします。エラーが出たら Secrets/共有権限 を確認。")
-
-    if storage.mode == "SHEETS":
-        st.success("Google Sheets 接続OK")
-        try:
-            ssid, wname = _get_sheet_ids()
-            st.caption(f"spreadsheet_id: {ssid}")
-            st.caption(f"worksheet: {wname}")
-        except Exception:
-            pass
-    else:
-        st.error("Google Sheets 接続NG（CSVにフォールバック）")
-        if storage.last_error is not None:
-            st.code(str(storage.last_error))
-
-    st.divider()
-    st.subheader("メニュー一覧（CSV）")
-    st.caption(f"{len(train_df)} 件読み込み")
+if "show_metronome" not in st.session_state:
+    st.session_state["show_metronome"] = False
+if "metro_duration" not in st.session_state:
+    st.session_state["metro_duration"] = 60
+if "metro_interval_label" not in st.session_state:
+    st.session_state["metro_interval_label"] = "標準"
+if "metro_sound" not in st.session_state:
+    st.session_state["metro_sound"] = "beep"
 
 # ======================
-# UI（ここから：更新前の形を維持）
+# UI
 # ======================
 st.title("FA期間 自主トレチェック")
 
@@ -521,6 +396,7 @@ weekday_jp = WEEKDAY_JP[weekday_idx]
 day_key = DAY_PLAN.get(weekday_key, "OFF")
 st.write(f"{weekday_jp}曜日｜メニュー：{DAY_TITLE.get(day_key, day_key)}")
 
+# 共通ルール表示
 with st.expander("共通ルール（必読）", expanded=True):
     for r in COMMON_RULES:
         st.write(f"・{r}")
@@ -549,12 +425,17 @@ with st.form(key=f"form_daily_{selected_date}"):
         if tip:
             st.write(f"注意：{tip}")
 
-        default_done = get_saved_done(df, selected_date, "DAILY", name)
-
         daily_checks[name] = {
-            "done": st.checkbox("やった", value=default_done, key=f"chk_{selected_date}_DAILY_{name}"),
+            "done": st.checkbox("やった", value=False, key=f"chk_{selected_date}_DAILY_{name}"),
             "part": part,
         }
+
+        # ★水曜・土曜の「縄跳び」だけ、リズム機能ボタンを追加（UIは極力そのまま）
+        if is_jump_rope_day(weekday_key) and is_jump_rope_item_name(name):
+            st.caption("目的：反発 / 足指 / リズム（60秒×3セット推奨）")
+            if st.form_submit_button("リズム機能を使う（縄跳びメトロノーム）"):
+                st.session_state["show_metronome"] = True
+
         st.divider()
 
     daily_submitted = st.form_submit_button("毎日メニューを保存")
@@ -570,16 +451,68 @@ if daily_submitted:
             part=v["part"],
             done=v["done"],
         )
-    storage.save(df)
+    save_data(df)
     st.success("毎日メニューを保存しました！")
+
+# ★メトロノームUI（縄跳び日だけ表示）
+if st.session_state.get("show_metronome", False) and is_jump_rope_day(weekday_key):
+    st.divider()
+    st.subheader("縄跳びリズム（メトロノーム）")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        dur = st.selectbox(
+            "時間（秒）",
+            METRO_DURATIONS,
+            index=METRO_DURATIONS.index(st.session_state.get("metro_duration", 60)) if st.session_state.get("metro_duration", 60) in METRO_DURATIONS else 0,
+        )
+        st.session_state["metro_duration"] = int(dur)
+
+    with col2:
+        labels = [x[0] for x in METRO_INTERVALS]
+        label = st.selectbox(
+            "間隔（リズム）",
+            labels,
+            index=labels.index(st.session_state.get("metro_interval_label", "標準")) if st.session_state.get("metro_interval_label", "標準") in labels else 0,
+        )
+        st.session_state["metro_interval_label"] = label
+
+    # interval値を取得
+    interval_sec = dict(METRO_INTERVALS)[st.session_state["metro_interval_label"]]
+
+    # 目標回数表示
+    target = calc_target_jumps(st.session_state["metro_duration"], interval_sec)
+    st.write(f"目標：**{st.session_state['metro_duration']}秒で {target}回**（{st.session_state['metro_interval_label']}）")
+    st.caption("推奨：**60秒×3セット**（セット間は軽く呼吸を整える程度）")
+
+    # 音タイプ（任意）
+    sound = st.radio("音", ["beep", "click"], horizontal=True, index=0)
+    st.session_state["metro_sound"] = sound
+
+    # メトロノーム本体
+    render_jump_rope_metronome(
+        duration_sec=st.session_state["metro_duration"],
+        interval_sec=interval_sec,
+        countdown_sec=3,
+        sound=st.session_state["metro_sound"],
+        key=f"jr_{selected_date}_{weekday_key}",
+        height=180,
+    )
+
+    if st.button("閉じる（メトロノーム）"):
+        st.session_state["show_metronome"] = False
 
 st.divider()
 
+# ----------------------
 # OFF
+# ----------------------
 if day_key == "OFF":
     st.info("今日はOFF（回復日）です。**ストレッチ10〜15分だけは必ず**やりましょう。")
 
+# ----------------------
 # トレ表示
+# ----------------------
 if day_key != "OFF":
     today_items = train_df[train_df["DAY"] == day_key].copy()
 
@@ -634,10 +567,8 @@ if day_key != "OFF":
                 elif watch_url:
                     st.link_button("▶ 動画/解説を見る（外部リンク）", watch_url)
 
-                default_done = get_saved_done(df, selected_date, day_key, name)
-
                 checks[name] = {
-                    "done": st.checkbox("やった", value=default_done, key=f"chk_{selected_date}_{day_key}_{name}"),
+                    "done": st.checkbox("やった", value=False, key=f"chk_{selected_date}_{day_key}_{name}"),
                     "part": part,
                 }
 
@@ -656,7 +587,7 @@ if day_key != "OFF":
                     part=v["part"],
                     done=v["done"],
                 )
-            storage.save(df)
+            save_data(df)
             st.success("保存しました！")
 
         st.divider()
@@ -668,24 +599,53 @@ if day_key != "OFF":
                 for _, r in optional_df.iterrows():
                     st.write(f"・{r['種目名']}（{r['部位']}）")
 
-    # 体重入力（保存済みがあれば初期値に反映）
+    # 体重入力
     st.subheader("体重（kg）")
-    saved_w = get_saved_weight(df, selected_date)
-    init_w = saved_w if saved_w is not None else 55.0
-
-    weight = st.number_input("今日の体重", min_value=30.0, max_value=90.0, step=0.1, value=float(init_w))
+    weight = st.number_input("今日の体重", min_value=30.0, max_value=90.0, step=0.1)
 
     if st.button("体重を保存"):
-        df = upsert_weight(df, selected_date, weekday_key, float(weight))
-        storage.save(df)
+        df = normalize_record_df(df)
+        d_str = selected_date.strftime("%Y-%m-%d")
+
+        df2 = df.copy()
+        df2["date_str"] = pd.to_datetime(df2["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+        mask = (df2["date_str"] == d_str) & (df2["day"] == "WEIGHT") & (df2["item"] == "weight")
+
+        if mask.any():
+            idx = df2[mask].index[0]
+            df.loc[idx, "date"] = d_str
+            df.loc[idx, "weekday"] = weekday_key
+            df.loc[idx, "day"] = "WEIGHT"
+            df.loc[idx, "item"] = "weight"
+            df.loc[idx, "part"] = "body"
+            df.loc[idx, "done"] = True
+            df.loc[idx, "weight"] = float(weight)
+        else:
+            new_row = {
+                "date": d_str,
+                "weekday": weekday_key,
+                "day": "WEIGHT",
+                "item": "weight",
+                "part": "body",
+                "done": True,
+                "weight": float(weight),
+            }
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+        df = normalize_record_df(df)
+        save_data(df)
         st.success("体重を保存しました！")
 
+# ----------------------
 # 親ビュー（集計）
+# ----------------------
 if parent_view:
     st.divider()
     st.header("体重推移")
 
     df = normalize_record_df(df)
+
     weight_df = df.dropna(subset=["weight"]).copy()
     if not weight_df.empty:
         weight_df["date"] = pd.to_datetime(weight_df["date"], errors="coerce")
