@@ -1,128 +1,193 @@
-# modules/metronome_component.py
-import math
-import wave
-import struct
-import io
-
+import time
 import streamlit as st
-import streamlit.components.v1 as components
 
+def _calc_target_reps(duration_sec: int, interval_sec: float) -> int:
+    if interval_sec <= 0:
+        return 0
+    return int(round(duration_sec / interval_sec))
 
-def _tone(freq_hz: float, sec: float, sr: int = 44100, vol: float = 0.35) -> list[int]:
-    n = max(1, int(sr * sec))
-    out = []
-    # クリック感を出すため、ほんの少しだけ減衰（クリックの耳障り軽減）
-    for i in range(n):
-        t = i / sr
-        env = 1.0 - (i / n) * 0.35
-        v = vol * env * math.sin(2.0 * math.pi * freq_hz * t)
-        out.append(int(max(-1.0, min(1.0, v)) * 32767))
-    return out
-
-
-def _silence(sec: float, sr: int = 44100) -> list[int]:
-    n = max(1, int(sr * sec))
-    return [0] * n
-
-
-def _to_wav_bytes(samples: list[int], sr: int = 44100) -> bytes:
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)  # 16-bit
-        wf.setframerate(sr)
-        frames = b"".join(struct.pack("<h", s) for s in samples)
-        wf.writeframes(frames)
-    return buf.getvalue()
-
-
-def build_metronome_wav(duration_sec: int, interval_sec: float, sr: int = 44100) -> bytes:
+def render_metronome_ui(st, key_prefix: str = "metronome"):
     """
-    3,2,1（1秒間隔の短いビープ）→ メトロノーム（指定間隔）→ 終了ビープ
-    を1本のWAVに合成して返す
+    縄跳び用メトロノームUI
+    - 「▶ 再生」ボタンを押す → 3,2,1 → 開始音 → メトロノーム → 終了音
+    - UX重視：バーが大量に出ないように、Streamlit標準の st.audio を連打しない
+      （WebAudio + HTMLで鳴らす）
     """
-    # 音色
-    beep = _tone(880, 0.07, sr=sr, vol=0.45)     # カウントダウン/開始
-    click = _tone(1200, 0.03, sr=sr, vol=0.35)   # メトロノーム（短いクリック）
-    end_beep = _tone(660, 0.25, sr=sr, vol=0.45) # 終了
 
-    samples: list[int] = []
+    # =========================
+    # 設定（UI表示）
+    # =========================
+    duration_options = {
+        "60秒（推奨）": 60,
+        "120秒": 120,
+        "180秒": 180,
+    }
 
-    # 3,2,1：ビープ→残りを無音で1秒にそろえる
-    for _ in range(3):
-        samples += beep
-        samples += _silence(max(0.0, 1.0 - (len(beep) / sr)), sr=sr)
+    tempo_options = {
+        "標準（0.50秒）": 0.50,   # 120回/60秒
+        "やや早（0.46秒）": 0.46,
+        "早い（0.42秒）": 0.42,
+        "高速（0.40秒）": 0.40,   # 150回/60秒
+    }
 
-    # メトロノーム本体
-    beats = int(round(duration_sec / interval_sec))
-    for _ in range(beats):
-        samples += click
-        rest = max(0.0, interval_sec - (len(click) / sr))
-        samples += _silence(rest, sr=sr)
+    # =========================
+    # セッション状態キー
+    # =========================
+    k_run = f"{key_prefix}_run"
+    k_started_at = f"{key_prefix}_started_at"
+    k_duration = f"{key_prefix}_duration"
+    k_interval = f"{key_prefix}_interval"
 
-    # 終了音
-    samples += end_beep
+    if k_run not in st.session_state:
+        st.session_state[k_run] = False
 
-    return _to_wav_bytes(samples, sr=sr)
+    # =========================
+    # UI（選択）
+    # =========================
+    c1, c2 = st.columns(2)
+    with c1:
+        duration_label = st.selectbox(
+            "時間（秒）",
+            list(duration_options.keys()),
+            index=0,
+            key=f"{key_prefix}_duration_select",
+        )
+        duration_sec = duration_options[duration_label]
 
+    with c2:
+        tempo_label = st.selectbox(
+            "リズム（テンポ）",
+            list(tempo_options.keys()),
+            index=0,
+            key=f"{key_prefix}_tempo_select",
+        )
+        interval_sec = tempo_options[tempo_label]
 
-def _audio_autoplay_html(wav_bytes: bytes, key: str) -> str:
-    # base64にして audio tag で1個だけ鳴らす（ボタン押下直後なら自動再生が通りやすい）
-    import base64
-    b64 = base64.b64encode(wav_bytes).decode("ascii")
-    # keyはDOM idの衝突回避
-    return f"""
-    <audio id="m_{key}" autoplay>
-      <source src="data:audio/wav;base64,{b64}" type="audio/wav">
-    </audio>
+    target_reps = _calc_target_reps(duration_sec, interval_sec)
+    st.caption(f"目安回数：**{target_reps}回**（{duration_sec}秒 ÷ {interval_sec:.2f}秒）")
+
+    # =========================
+    # ▶ 再生ボタンで開始（要望対応）
+    # =========================
+    bcol1, bcol2 = st.columns([1, 1])
+
+    with bcol1:
+        if st.button("▶ 再生（3,2,1→開始）", key=f"{key_prefix}_play"):
+            st.session_state[k_run] = True
+            st.session_state[k_started_at] = time.time()
+            st.session_state[k_duration] = int(duration_sec)
+            st.session_state[k_interval] = float(interval_sec)
+
+    with bcol2:
+        if st.button("■ 停止", key=f"{key_prefix}_stop"):
+            st.session_state[k_run] = False
+
+    # =========================
+    # 実行中：HTML(WebAudio)で音を鳴らす
+    # =========================
+    if not st.session_state.get(k_run, False):
+        return
+
+    started_at = float(st.session_state.get(k_started_at, time.time()))
+    duration_sec = int(st.session_state.get(k_duration, duration_sec))
+    interval_sec = float(st.session_state.get(k_interval, interval_sec))
+
+    # ここで「押した瞬間に」カウントダウンを含む処理を開始する
+    # Streamlitは1回描画して終わるので、JS側で時間管理する
+    # （バー大量表示の原因になる st.audio の連打はしない）
+
+    html = f"""
+    <div style="padding:12px 10px;border:1px solid #ddd;border-radius:10px;">
+      <div style="font-size:18px;font-weight:700;margin-bottom:6px;">
+        縄跳びメトロノーム（{duration_sec}秒 / {interval_sec:.2f}秒）
+      </div>
+      <div id="status" style="font-size:16px;margin-bottom:8px;">準備中…</div>
+      <div style="font-size:14px;color:#666;">
+        ※ 音が出ない場合：端末の消音、Bluetooth、ブラウザの自動再生制限をご確認ください。
+      </div>
+    </div>
+
     <script>
-      const a = document.getElementById("m_{key}");
-      // 自動再生がブロックされた場合に備えてplay()も試す
-      if (a) {{
-        const p = a.play();
-        if (p !== undefined) {{
-          p.catch(() => {{}});
+      (function() {{
+        // 二重起動を避けるため、毎回ユニークIDを作る
+        const uid = "{key_prefix}_{int(time.time()*1000)}";
+        const statusEl = document.getElementById("status");
+
+        // WebAudio
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        const ctx = new AudioContext();
+
+        function beep(freq, ms, gainVal) {{
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = "sine";
+          o.frequency.value = freq;
+          g.gain.value = gainVal;
+          o.connect(g);
+          g.connect(ctx.destination);
+          o.start();
+          setTimeout(() => {{
+            o.stop();
+          }}, ms);
         }}
-      }}
+
+        // iOS等で必要：ユーザー操作直後にresume
+        ctx.resume().catch(()=>{{}});
+
+        const durationSec = {duration_sec};
+        const intervalSec = {interval_sec};
+
+        // 3,2,1 カウントダウン → 開始音 → tick → 終了音
+        const countdown = [3,2,1];
+
+        function setStatus(t) {{
+          if (statusEl) statusEl.innerText = t;
+        }}
+
+        function sleep(ms) {{
+          return new Promise(resolve => setTimeout(resolve, ms));
+        }}
+
+        async function run() {{
+          // countdown
+          for (let i=0; i<countdown.length; i++) {{
+            setStatus("開始まで " + countdown[i] + "…");
+            beep(520, 120, 0.15);
+            await sleep(1000);
+          }}
+
+          // start
+          setStatus("スタート！");
+          beep(880, 180, 0.20);
+
+          const start = performance.now();
+          const end = start + durationSec*1000;
+          let next = start;
+          let count = 0;
+
+          while (performance.now() < end) {{
+            const now = performance.now();
+            if (now >= next) {{
+              // tick
+              beep(740, 70, 0.12);
+              count++;
+              next += intervalSec*1000;
+              const remain = Math.max(0, Math.ceil((end - now)/1000));
+              setStatus("実行中… 残り " + remain + " 秒（目安 " + count + " 回）");
+            }}
+            await sleep(5);
+          }}
+
+          // end
+          setStatus("終了！");
+          beep(440, 250, 0.18);
+          await sleep(150);
+          beep(440, 250, 0.18);
+        }}
+
+        run();
+      }})();
     </script>
     """
 
-
-def render_metronome_ui(st, key_prefix: str = "rope"):
-    st.caption("時間とテンポを選んで ▶開始。3,2,1 のあとにメトロノームが鳴ります。")
-
-    duration = st.selectbox(
-        "時間（秒）",
-        [60, 120, 180],
-        index=0,
-        key=f"{key_prefix}_dur",
-    )
-
-    tempo_map = {
-        "標準（0.50s）": 0.50,
-        "やや早（0.46s）": 0.46,
-        "早い（0.42s）": 0.42,
-        "高速（0.40s）": 0.40,
-    }
-    tempo_label = st.selectbox(
-        "テンポ",
-        list(tempo_map.keys()),
-        index=0,
-        key=f"{key_prefix}_tempo",
-    )
-    interval = tempo_map[tempo_label]
-
-    expected = int(round(duration / interval))
-    st.write(f"目安回数：**{expected} 回**（{duration}秒 / {interval:.2f}秒）")
-
-    # ※ st.form の中では st.button が使えないので、ここは“フォーム外”で呼ばれる前提
-    if st.button("▶ リズム開始（3,2,1 → メトロノーム）", key=f"{key_prefix}_start"):
-        wav = build_metronome_wav(duration_sec=duration, interval_sec=interval)
-
-        # 1) 自動再生（推奨）
-        components.html(_audio_autoplay_html(wav, key=f"{key_prefix}_{duration}_{tempo_label}"), height=0)
-
-        # 2) 自動再生がブロックされた時の保険（1個だけ）
-        st.audio(wav, format="audio/wav")
-
-        st.info("自動再生されない場合は、下の再生ボタン（▶）を1回押してください。")
+    st.components.v1.html(html, height=150)
