@@ -1,3 +1,5 @@
+# modules/ui_parent_view.py
+
 import pandas as pd
 import altair as alt
 
@@ -7,8 +9,8 @@ def _try_get_records_df(storage):
     storage実装差異に強い取得。
     取れない場合でも例外で落とさず None を返す。
     """
-    # よくある命名を順に試す（存在するものだけ実行）
     candidates = [
+        "load_all_records",          # ✅ これを追加（今回の本命）
         "get_all_records_df",
         "read_all_records_df",
         "get_records_df",
@@ -43,12 +45,10 @@ def render_parent_view(st, storage):
         st.warning("記録データが取得できませんでした（Sheets/CSVの読み込み結果を確認してください）。")
         return
 
-    # 期待カラムが無いケースにも耐える
     if "date" not in df.columns:
         st.warning("記録に 'date' カラムが見つかりません。")
         return
 
-    # --- 体重推移 ---
     st.subheader("体重推移")
 
     if "weight" not in df.columns:
@@ -65,7 +65,7 @@ def render_parent_view(st, storage):
         return
 
     y_min = 40.0
-    y_max = float(max(w["weight"].max(), y_min + 1.0))  # 念のため上限が下限以下にならないように
+    y_max = float(max(w["weight"].max(), y_min + 1.0))
 
     chart = (
         alt.Chart(w)
