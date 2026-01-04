@@ -60,8 +60,8 @@ def render_parent_view(st, storage):
             )
             st.altair_chart(chart_w, use_container_width=True)
 
-    # --- トレ実施（部位別 積み上げ） ---
-    st.subheader("トレ実施数（部位別・積み上げ）")
+    # --- トレ実施（部位別：トータル棒グラフ） ---
+    st.subheader("トレ実施数（部位別・トータル）")
 
     # done=True だけ、体重は除外
     done_df = d[(d["done"] == True) & (d["day"] != "WEIGHT")].copy()
@@ -70,28 +70,22 @@ def render_parent_view(st, storage):
         st.info("まだトレ記録がありません。")
         return
 
-    # 日付（YYYY-MM-DD）に丸めて集計
-    done_df["date_day"] = done_df["date"].dt.date.astype(str)
-
     # part が空の行は "Unknown" に寄せる（落ちないように）
     done_df["part"] = done_df["part"].fillna("Unknown").replace("", "Unknown")
 
-    agg = done_df.groupby(["date_day", "part"]).size().reset_index(name="count")
-
-    # 日付順に見えるようソートキー
-    date_order = sorted(agg["date_day"].unique().tolist())
+    # ✅ 全期間トータル集計（部位ごと）
+    agg = done_df.groupby("part").size().reset_index(name="count")
+    agg = agg.sort_values("count", ascending=False)
 
     chart_p = (
         alt.Chart(agg)
         .mark_bar()
         .encode(
-            x=alt.X("date_day:N", title="日付", sort=date_order),
+            x=alt.X("part:N", title="部位", sort=agg["part"].tolist()),
             y=alt.Y("count:Q", title="実施数"),
-            color=alt.Color("part:N", title="部位"),
             tooltip=[
-                alt.Tooltip("date_day:N", title="日付"),
                 alt.Tooltip("part:N", title="部位"),
-                alt.Tooltip("count:Q", title="回数"),
+                alt.Tooltip("count:Q", title="実施数"),
             ],
         )
         .properties(height=360)
