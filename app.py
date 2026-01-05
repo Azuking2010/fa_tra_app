@@ -11,6 +11,10 @@ from modules.ui_day_training import render_day_training
 from modules.ui_weight import render_weight
 from modules.ui_parent_view import render_parent_view
 
+# ★追加：月曜OFFで表示する用
+from modules.box_breath_component import render_box_breath_ui
+
+
 # ======================
 # ページ設定
 # ======================
@@ -87,6 +91,11 @@ st.divider()
 # OFF or DAYトレ
 # ======================
 if day_key == "OFF":
+    # ★追加：月曜OFFのおまけ（ボックスブリージング）
+    # ここは「OFFの日すべて」に出る仕様になる（＝月曜想定）
+    render_box_breath_ui(st, key_prefix=f"box_{selected_date}_OFF")
+    st.divider()
+
     st.info("今日はOFF（回復日）です。**ストレッチ10〜15分だけは必ず**やりましょう。")
 else:
     render_day_training(st, storage, selected_date, weekday_key, day_key, train_df)
