@@ -3,6 +3,8 @@ import pandas as pd
 
 from modules.constants import DAY_TITLE, EX_TIPS
 from modules.youtube_utils import is_youtube_url
+from modules.breath_component import render_breath_ui
+
 
 def render_day_training(st, storage, selected_date: date_type, weekday_key: str, day_key: str, train_df: pd.DataFrame):
     today_items = train_df[train_df["DAY"] == day_key].copy()
@@ -12,6 +14,13 @@ def render_day_training(st, storage, selected_date: date_type, weekday_key: str,
         return
 
     st.header(DAY_TITLE.get(day_key, day_key))
+
+    # =========================
+    # 呼吸法ガイド（体幹DAYのみ）
+    # =========================
+    if day_key == "CORE":
+        render_breath_ui(st, key_prefix=f"breath_{selected_date}_{day_key}")
+        st.divider()
 
     required_df = today_items[today_items["is_required"]].copy()
     optional_df = today_items[~today_items["is_required"]].copy()
@@ -27,13 +36,16 @@ def render_day_training(st, storage, selected_date: date_type, weekday_key: str,
         )
 
     display_rows = []
+
+    # 必須を先に
     for _, r in required_df.iterrows():
         display_rows.append(r)
 
+    # 追加は選んだ場合のみ1つ
     if add_choice and add_choice != "追加なし":
-        add_row = optional_df[optional_df["種目名"] == add_choice]
-        if not add_row.empty:
-            display_rows.append(add_row.iloc[0])
+        add_r = optional_df[optional_df["種目名"] == add_choice]
+        if not add_r.empty:
+            display_rows.append(add_r.iloc[0])
 
     with st.form(key=f"form_{selected_date}_{day_key}"):
         checks = {}
