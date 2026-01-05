@@ -228,4 +228,5 @@ def render_breath_ui(st, key_prefix: str = "breath"):
     }})();
     </script>
     """
-    st.components.v1.html(html, height=360, key=f"{key_prefix}_html")
+    st.components.v1.html(html, height=360)
+
