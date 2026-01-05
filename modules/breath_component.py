@@ -1,76 +1,84 @@
 import streamlit as st
 
 
-def render_breath_ui(st, key_prefix: str = "breath"):
+def render_breath_ui(stl, key_prefix: str = "breath"):
     """
-    体幹DAY冒頭用 呼吸法ガイド（45秒＝15秒×3セット）
-    - 円形45セグメント：進捗が塗られていく
+    体幹DAY冒頭用 呼吸法ガイド（48秒＝16秒×3セット）
+    - 円形48セグメント：進捗が塗られていく（1秒=1セグメント）
     - Start→3,2,1→開始（描画と音を同期）
     - 音はWebAudio発振で軽量・安定（外部音源不要）
+    - 注意：Streamlitのst.components.v1.htmlは環境によりkey引数が非対応のため渡さない
 
-    1セット（15秒）：
+    1セット（16秒）：
       0-3秒  : 吸う（緑）4秒
       4-11秒 : 吐く（赤）8秒
-      12-14秒: 通常（青）3秒
+      12-15秒: 通常（青）4秒
     """
 
     k_run = f"{key_prefix}_run"
-    st.subheader("呼吸法（45秒）")
-    st.caption("Startを押す → 3-2-1 → 開始（吸う4秒 → 吐く8秒 → 通常3秒 ×3セット）")
 
-    col1, col2 = st.columns([1, 1])
+    stl.subheader("呼吸法（48秒）")
+    stl.caption("Startを押す → 3-2-1 → 開始（吸う4秒 → 吐く8秒 → 通常4秒 ×3セット）")
+
+    col1, col2 = stl.columns([1, 1])
     with col1:
-        if st.button("▶ Start（3,2,1→開始）", key=f"{key_prefix}_start"):
-            st.session_state[k_run] = True
+        if stl.button("▶ Start（3,2,1→開始）", key=f"{key_prefix}_start"):
+            stl.session_state[k_run] = True
     with col2:
-        if st.button("■ Stop", key=f"{key_prefix}_stop"):
-            st.session_state[k_run] = False
+        if stl.button("■ Stop", key=f"{key_prefix}_stop"):
+            stl.session_state[k_run] = False
 
-    if not st.session_state.get(k_run, False):
-        st.info("Startを押すと呼吸ガイドが始まります。")
+    if not stl.session_state.get(k_run, False):
+        stl.info("Startを押すと呼吸ガイドが始まります。")
         return
 
+    # JS側でタイマー・描画・音を完結させる（Streamlit rerunの影響を受けにくい）
     html = f"""
     <div style="display:flex; flex-direction:column; gap:10px; align-items:center; justify-content:center; width:100%;">
       <div id="{key_prefix}_status" style="font-size:14px; font-weight:600;"></div>
 
-      <svg id="{key_prefix}_svg" width="240" height="240" viewBox="0 0 240 240" role="img" aria-label="Breathing indicator">
-        <circle cx="120" cy="120" r="100" fill="none" stroke="rgba(160,160,160,0.25)" stroke-width="10"></circle>
+      <svg id="{key_prefix}_svg" width="260" height="260" viewBox="0 0 260 260" role="img" aria-label="Breathing indicator">
+        <circle cx="130" cy="130" r="108" fill="none" stroke="rgba(160,160,160,0.25)" stroke-width="10"></circle>
         <g id="{key_prefix}_segments"></g>
 
-        <circle cx="120" cy="120" r="58" fill="rgba(255,255,255,0.03)" stroke="rgba(160,160,160,0.15)" stroke-width="1"></circle>
-        <text id="{key_prefix}_phase" x="120" y="120" text-anchor="middle" dominant-baseline="middle"
-              style="font-size:16px; font-weight:700; fill:rgba(240,240,240,0.9);">
+        <circle cx="130" cy="130" r="62" fill="rgba(255,255,255,0.03)" stroke="rgba(160,160,160,0.15)" stroke-width="1"></circle>
+        <text id="{key_prefix}_phase" x="130" y="130" text-anchor="middle" dominant-baseline="middle"
+              style="font-size:16px; font-weight:700; fill:rgba(60,60,60,0.88);">
           準備…
         </text>
-        <text id="{key_prefix}_timer" x="120" y="146" text-anchor="middle" dominant-baseline="middle"
-              style="font-size:12px; font-weight:600; fill:rgba(240,240,240,0.75);">
-          0 / 45
+        <text id="{key_prefix}_timer" x="130" y="156" text-anchor="middle" dominant-baseline="middle"
+              style="font-size:12px; font-weight:600; fill:rgba(60,60,60,0.65);">
+          0 / 48
         </text>
       </svg>
 
-      <div style="font-size:12px; color:rgba(240,240,240,0.75);">
-        姿勢：立位・膝を軽く緩める・頭が上に引っ張られる感覚
+      <div style="max-width:520px; line-height:1.55; font-size:12px; color:rgba(40,40,40,0.75); text-align:left;">
+        <div style="font-weight:700; margin-bottom:4px;">ポイント</div>
+        <div>・<b>姿勢</b>：立位（または椅子）。背筋を伸ばし、肩はすくめない。みぞおち〜肋骨が「上に引っ張られる」感覚。</div>
+        <div>・<b>吸う（4秒）</b>：鼻から。お腹→胸の順に広がる。胸だけに偏らない。</div>
+        <div>・<b>吐く（8秒）</b>：口から細く長く。最後まで吐き切り、肋骨を締める（腰を反らない）。</div>
+        <div>・<b>通常（4秒）</b>：力を抜き、自然呼吸で次の吸気に備える。</div>
       </div>
     </div>
 
     <script>
     (function() {{
-      const total = 45;
-      const perSet = 15;
-      const inhaleLen = 4;
-      const exhaleLen = 8;
+      const total = 48;      // 48 sec
+      const perSet = 16;     // 16 sec
+      const inhaleLen = 4;   // sec
+      const exhaleLen = 8;   // sec
+      // normal = perSet - inhaleLen - exhaleLen = 4 sec
 
       const statusEl = document.getElementById("{key_prefix}_status");
       const segRoot  = document.getElementById("{key_prefix}_segments");
       const phaseEl  = document.getElementById("{key_prefix}_phase");
       const timerEl  = document.getElementById("{key_prefix}_timer");
 
-      // ----- SVG segments -----
-      const cx = 120, cy = 120;
-      const rOuter = 104;
-      const rInner = 92;
-      const segCount = total; // 45 segments
+      // ---------- SVG segments ----------
+      const cx = 130, cy = 130;
+      const rOuter = 112;
+      const rInner = 100;
+      const segCount = total; // 48 segments
       const baseColor = "rgba(180,180,180,0.18)";
 
       function polarToXY(cx, cy, r, deg) {{
@@ -79,7 +87,7 @@ def render_breath_ui(st, key_prefix: str = "breath"):
       }}
 
       function describeArcSegment(i, segCount, rOuter, rInner) {{
-        const segDeg = 360 / segCount; // 8 deg
+        const segDeg = 360 / segCount; // 7.5 deg (OK: floating)
         const start = i * segDeg;
         const end   = (i + 1) * segDeg;
 
@@ -109,18 +117,20 @@ def render_breath_ui(st, key_prefix: str = "breath"):
       }}
 
       function phaseColor(phase) {{
-        if (phase >= 0 && phase <= 3)  return "rgba(60, 200, 120, 0.95)"; // inhale
-        if (phase >= 4 && phase <= 11) return "rgba(235, 90, 90, 0.95)";  // exhale
-        return "rgba(80, 170, 255, 0.95)"; // normal
+        // phase: 0..15 within a set
+        if (phase >= 0 && phase <= 3)  return "rgba(60, 200, 120, 0.95)"; // inhale green
+        if (phase >= 4 && phase <= 11) return "rgba(235, 90, 90, 0.95)";  // exhale red
+        return "rgba(80, 170, 255, 0.95)"; // normal blue (12..15)
       }}
 
       function phaseLabel(phase) {{
         if (phase >= 0 && phase <= 3)  return "吸う（4秒）";
         if (phase >= 4 && phase <= 11) return "吐く（8秒）";
-        return "通常呼吸（3秒）";
+        return "通常呼吸（4秒）";
       }}
 
       function paintProgress(t) {{
+        // t: 0..47
         for (let i=0; i<segCount; i++) {{
           if (i <= t) {{
             const p = i % perSet;
@@ -138,9 +148,11 @@ def render_breath_ui(st, key_prefix: str = "breath"):
         if (statusEl) statusEl.textContent = msg;
       }}
 
-      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      function sleep(ms) {{
+        return new Promise(resolve => setTimeout(resolve, ms));
+      }}
 
-      // ----- WebAudio -----
+      // ---------- WebAudio ----------
       let audioCtx = null;
 
       function ensureAudio() {{
@@ -169,6 +181,7 @@ def render_breath_ui(st, key_prefix: str = "breath"):
       }}
 
       function tone(freq, durationMs, gain=0.055) {{
+        // gentle continuous tone (inhale/exhale)
         const ctx = ensureAudio();
         const o = ctx.createOscillator();
         const g = ctx.createGain();
@@ -187,7 +200,9 @@ def render_breath_ui(st, key_prefix: str = "breath"):
         o.stop(now + durationMs / 1000.0 + 0.03);
       }}
 
+      // ---------- Runner ----------
       async function run() {{
+        // countdown
         const countdown = [3,2,1];
         for (let i=0; i<countdown.length; i++) {{
           setStatus("開始まで " + countdown[i] + "…");
@@ -197,25 +212,32 @@ def render_breath_ui(st, key_prefix: str = "breath"):
           await sleep(1000);
         }}
 
+        // start marker
         setStatus("開始！");
         beep(660, 160, 0.14);
         await sleep(120);
 
         for (let t=0; t<total; t++) {{
           paintProgress(t);
+
           const p = t % perSet;
 
+          // phase sounds
           if (p === 0) {{
+            // inhale 4 sec
             tone(420, inhaleLen * 1000, 0.055);
           }} else if (p === inhaleLen) {{
+            // exhale 8 sec (p==4)
             tone(260, exhaleLen * 1000, 0.05);
           }} else if (p >= inhaleLen + exhaleLen) {{
+            // normal breathing 4 sec (p==12..15): short beeps each second
             beep(880, 90, 0.11);
           }}
 
           await sleep(1000);
         }}
 
+        // end
         setStatus("完了！");
         phaseEl.textContent = "完了！";
         timerEl.textContent = total + " / " + total;
@@ -228,5 +250,6 @@ def render_breath_ui(st, key_prefix: str = "breath"):
     }})();
     </script>
     """
-    st.components.v1.html(html, height=360)
 
+    # keyは渡さない（環境によりTypeErrorになるため）
+    stl.components.v1.html(html, height=420)
