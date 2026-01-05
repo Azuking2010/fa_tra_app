@@ -4,22 +4,43 @@ import pandas as pd
 from modules.constants import DAY_TITLE, EX_TIPS
 from modules.youtube_utils import is_youtube_url
 from modules.breath_component import render_breath_ui
+from modules.box_breath_component import render_box_breath_ui
 
 
-def render_day_training(st, storage, selected_date: date_type, weekday_key: str, day_key: str, train_df: pd.DataFrame):
+def render_day_training(
+    st,
+    storage,
+    selected_date: date_type,
+    weekday_key: str,
+    day_key: str,
+    train_df: pd.DataFrame
+):
     today_items = train_df[train_df["DAY"] == day_key].copy()
 
     if today_items.empty:
         st.error("このDAYに該当する種目がマスタにありません。マスタの「部位」表記を確認してください。")
         return
 
+    # ===== DAYタイトル =====
     st.header(DAY_TITLE.get(day_key, day_key))
 
-    # 体幹DAY（CORE）の冒頭で呼吸法ガイドを表示（フォーム外）
-    if day_key == "CORE":
-        render_breath_ui(st, key_prefix=f"breath_{selected_date}_{day_key}")
+    # ===== 月曜（休養/ストレッチDAY）のおまけ：ボックスブリージング =====
+    if weekday_key == "mon":
+        render_box_breath_ui(
+            st,
+            key_prefix=f"box_{selected_date}_{day_key}"
+        )
         st.divider()
 
+    # ===== 体幹DAY（CORE）の冒頭で呼吸法ガイド =====
+    if day_key == "CORE":
+        render_breath_ui(
+            st,
+            key_prefix=f"breath_{selected_date}_{day_key}"
+        )
+        st.divider()
+
+    # ===== 必須 / 任意 種目の仕分け =====
     required_df = today_items[today_items["is_required"]].copy()
     optional_df = today_items[~today_items["is_required"]].copy()
 
@@ -45,6 +66,7 @@ def render_day_training(st, storage, selected_date: date_type, weekday_key: str,
         if not add_r.empty:
             display_rows.append(add_r.iloc[0])
 
+    # ===== 実施チェックフォーム =====
     with st.form(key=f"form_{selected_date}_{day_key}"):
         checks = {}
 
@@ -70,7 +92,11 @@ def render_day_training(st, storage, selected_date: date_type, weekday_key: str,
                 st.link_button("▶ 動画/解説を見る（外部リンク）", watch_url)
 
             checks[name] = {
-                "done": st.checkbox("やった", value=False, key=f"chk_{selected_date}_{day_key}_{name}"),
+                "done": st.checkbox(
+                    "やった",
+                    value=False,
+                    key=f"chk_{selected_date}_{day_key}_{name}"
+                ),
                 "part": part,
             }
 
@@ -78,11 +104,12 @@ def render_day_training(st, storage, selected_date: date_type, weekday_key: str,
 
         submitted = st.form_submit_button("このメニューを保存")
 
+    # ===== 保存処理 =====
     if submitted:
         rows = []
         d_str = selected_date.strftime("%Y-%m-%d")
 
-        # ✅ done=True のものだけ追記
+        # done=True のものだけ追記
         for name, v in checks.items():
             if v["done"]:
                 rows.append({
@@ -98,6 +125,7 @@ def render_day_training(st, storage, selected_date: date_type, weekday_key: str,
         storage.append_records(rows)
         st.success("保存しました！")
 
+    # ===== 参考表示（任意候補） =====
     with st.expander("他の候補（今日はやらなくてOK）", expanded=False):
         if optional_df.empty:
             st.write("（選択候補なし）")
