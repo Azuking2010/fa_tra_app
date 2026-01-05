@@ -15,9 +15,7 @@ def render_day_training(st, storage, selected_date: date_type, weekday_key: str,
 
     st.header(DAY_TITLE.get(day_key, day_key))
 
-    # =========================
-    # 呼吸法ガイド（体幹DAYのみ）
-    # =========================
+    # 体幹DAY（CORE）の冒頭で呼吸法ガイドを表示（フォーム外）
     if day_key == "CORE":
         render_breath_ui(st, key_prefix=f"breath_{selected_date}_{day_key}")
         st.divider()

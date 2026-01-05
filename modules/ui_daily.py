@@ -15,56 +15,34 @@ def _calc_streak_days_from_latest_training(storage) -> int:
     except Exception:
         return 0
 
-    if df is None or df.empty:
+    if df is None or len(df) == 0:
         return 0
 
-    # 必須カラムチェック
-    for c in ["date", "day", "done"]:
-        if c not in df.columns:
-            return 0
+    # done=True & day!=WEIGHT の日付だけ
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df[(df["done"] == True) & (df["day"] != "WEIGHT") & (df["date"].notna())]
 
-    d = df.copy()
-
-    # date整形
-    d["date"] = pd.to_datetime(d["date"], errors="coerce").dt.date
-    d = d.dropna(subset=["date"])
-
-    # done整形（Sheets/CSVの差異吸収）
-    d["done"] = d["done"].astype(str).str.lower().isin(["true", "1", "yes", "y"])
-
-    # 体重は除外、done=Trueのみ
-    d = d[(d["done"] == True) & (d["day"] != "WEIGHT")]
-
-    if d.empty:
+    if df.empty:
         return 0
 
-    # 実施日集合
-    days = sorted(set(d["date"].tolist()))
-    if not days:
-        return 0
+    days = sorted(df["date"].dt.date.unique(), reverse=True)
 
-    # 起点：直近の実施日
-    cur = days[-1]
+    # 直近日を起点に連続日数カウント
     streak = 1
-
-    # 直近日から1日ずつ遡って存在する限りカウント
-    day_set = set(days)
-    while True:
-        prev = cur.fromordinal(cur.toordinal() - 1)  # cur - 1 day（date型で安全に）
-        if prev in day_set:
+    base = days[0]
+    for d in days[1:]:
+        if (base - d).days == 1:
             streak += 1
-            cur = prev
+            base = d
         else:
             break
-
     return streak
 
 
 def render_daily(st, storage, selected_date: date_type, weekday_key: str):
-    # ✅ 子ビュー最上部：継続日数表示（体重は除外、直近トレ日から遡る）
+    # 継続日数（体重除外）
     streak = _calc_streak_days_from_latest_training(storage)
-
-    # コメント文（候補を差し替えたい場合はここだけ変更でOK）
     if streak > 0:
         st.markdown(f"### 🔥 **{streak}日継続中！この調子で頑張れ👍**")
     else:
@@ -81,6 +59,11 @@ def render_daily(st, storage, selected_date: date_type, weekday_key: str):
     # 縄跳びのときだけメトロノームUIを出す
     is_rope_day = daily_optional and ("縄跳び" in daily_optional.get("name", "")) and (weekday_key in ["wed", "sat"])
 
+    # 縄跳びの日だけ、フォーム外にメトロノームUIを表示（st.form内でst.buttonが使えないため）
+    if is_rope_day:
+        with st.expander("リズム機能を使う（60秒×3セット推奨）", expanded=False):
+            render_metronome_ui(st, key_prefix=f"rope_{selected_date}")
+
     with st.form(key=f"form_daily_{selected_date}"):
         daily_checks = {}
 
@@ -93,11 +76,6 @@ def render_daily(st, storage, selected_date: date_type, weekday_key: str):
             st.subheader(f"{badge} {name}")
             if tip:
                 st.write(f"注意：{tip}")
-
-            # 縄跳びの日だけ「リズム機能」案内
-            if is_rope_day and ("縄跳び" in name):
-                with st.expander("リズム機能を使う（60秒×3セット推奨）", expanded=False):
-                    render_metronome_ui(st, key_prefix=f"rope_{selected_date}")
 
             daily_checks[name] = {
                 "done": st.checkbox("やった", value=False, key=f"chk_{selected_date}_DAILY_{name}"),
