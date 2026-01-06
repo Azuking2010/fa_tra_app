@@ -23,6 +23,8 @@ def render_day_training(
 
     # ===== DAYタイトル =====
     st.header(DAY_TITLE.get(day_key, day_key))
+    st.write("DEBUG weekday_key =", weekday_key)
+
 
     # ===== 月曜（休養/ストレッチDAY）のおまけ：ボックスブリージング =====
     if weekday_key == "mon":
