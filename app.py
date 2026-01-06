@@ -14,6 +14,9 @@ from modules.ui_parent_view import render_parent_view
 # ★追加：月曜OFFで表示する用
 from modules.box_breath_component import render_box_breath_ui
 
+# ★追加：ポートフォリオページ
+from modules.portfolio.ui_portfolio import render_portfolio
+
 
 # ======================
 # ページ設定
@@ -48,7 +51,7 @@ train_df = load_training_list()
 # ======================
 st.title("FA期間 自主トレチェック")
 
-# サイドバー：接続状態など
+# サイドバー：接続状態など + ページ切替
 with st.sidebar:
     st.header("設定 / 状態")
     ok, msg = storage.healthcheck()
@@ -64,6 +67,22 @@ with st.sidebar:
             st.caption(f"spreadsheet_id:\n{info['spreadsheet_id']}")
         if "worksheet" in info:
             st.caption(f"worksheet: {info['worksheet']}")
+
+    st.divider()
+
+    # ★追加：ページ切替（安全にサイドバーへ）
+    page = st.radio("ページ", ["トレーニング", "ポートフォリオ"], index=0)
+
+# ======================
+# ポートフォリオページ
+# ======================
+if page == "ポートフォリオ":
+    render_portfolio(st, storage)
+    st.stop()
+
+# ======================
+# ここから従来のトレーニング画面（現行維持）
+# ======================
 
 # 親ビュー
 parent_view = st.toggle("親ビュー（集計）", value=False)
