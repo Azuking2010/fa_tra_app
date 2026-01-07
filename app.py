@@ -1,5 +1,6 @@
 import streamlit as st
 from datetime import date
+import math
 
 from modules.constants import (
     WEEKDAY_KEYS, WEEKDAY_JP, DAY_PLAN, DAY_TITLE, COMMON_RULES
@@ -42,15 +43,27 @@ a, button { font-size: 20px !important; }
 # helper（最新の「値」を拾う）
 #  - 0は「無効値（空白と同等）」として扱う
 # ======================
+def _is_nan(v) -> bool:
+    try:
+        return isinstance(v, float) and math.isnan(v)
+    except Exception:
+        return False
+
+
 def _is_blank_like(v):
     if v is None:
+        return True
+    if _is_nan(v):
         return True
     if isinstance(v, str):
         s = v.strip()
         return s == "" or s.lower() in ["nan", "none"]
     if isinstance(v, (int, float)):
         try:
-            return float(v) == 0.0
+            fv = float(v)
+            if _is_nan(fv):
+                return True
+            return fv == 0.0
         except Exception:
             return False
     return False
@@ -60,6 +73,7 @@ def _latest_non_empty(df, col):
     """
     末尾から遡って、最初に見つかった「空でない値」を返す。
     ※ここでの「空でない」は 0 を除外（0は無効値扱い）
+    ※NaN も除外
     """
     if df is None or df.empty or col not in df.columns:
         return None
@@ -88,6 +102,8 @@ def _latest_non_empty(df, col):
                 fv = float(v)
             except Exception:
                 continue
+            if _is_nan(fv):
+                continue
             if fv == 0.0:
                 continue
             return fv
@@ -97,11 +113,13 @@ def _latest_non_empty(df, col):
         s2 = s.dropna()
         if s2.empty:
             return None
-        # 最後が0の可能性があるので遡る
         for v in reversed(s2.tolist()):
             try:
-                if float(v) != 0.0:
-                    return v
+                fv = float(v)
+                if _is_nan(fv):
+                    continue
+                if fv != 0.0:
+                    return fv
             except Exception:
                 continue
         return None
@@ -110,26 +128,28 @@ def _latest_non_empty(df, col):
 def _latest_bool(df, col):
     v = _latest_non_empty(df, col)
     if v is None:
-        # boolは 0扱いではないので、ここは False をデフォルト
         return False
     if isinstance(v, bool):
         return v
     return str(v).strip().lower() in ["true", "1", "yes", "y", "on"]
 
 
-def _prev_caption(st, v):
-    """前回値：表示（0/空は表示しない）"""
+def _prev_caption(st_container, v):
+    """前回値：表示（0/空/NaNは表示しない）"""
     if _is_blank_like(v):
         return
-    st.caption(f"前回値：{v}")
+    st_container.caption(f"前回値：{v}")
 
 
 def _num_default(v, fallback=0.0):
-    """前回値をデフォルトに入れる（0/空ならfallback=0）"""
+    """前回値をデフォルトに入れる（0/空/NaNならfallback=0）"""
     if _is_blank_like(v):
         return float(fallback)
     try:
-        return float(v)
+        fv = float(v)
+        if _is_nan(fv):
+            return float(fallback)
+        return fv
     except Exception:
         return float(fallback)
 
@@ -143,11 +163,50 @@ def _text_default(v, fallback=""):
     return s
 
 
+def _sec_to_min_sec(total_seconds: float | int | None) -> tuple[int, int]:
+    """秒→(分,秒) / None,0,NaNは(0,0)"""
+    if total_seconds is None:
+        return 0, 0
+    try:
+        fv = float(total_seconds)
+        if _is_nan(fv) or fv <= 0:
+            return 0, 0
+        sec_int = int(round(fv))
+        m = sec_int // 60
+        s = sec_int % 60
+        return m, s
+    except Exception:
+        return 0, 0
+
+
+def _mmss_str(total_seconds: float | int | None) -> str:
+    """秒→ 'm:ss'（無効なら '—'）"""
+    m, s = _sec_to_min_sec(total_seconds)
+    if m == 0 and s == 0:
+        return "—"
+    return f"{m}:{s:02d}"
+
+
+def _prev_time_caption(st_container, sec_value: float | int | None):
+    """前回値：m:ss（xxx sec）"""
+    if _is_blank_like(sec_value):
+        return
+    try:
+        fv = float(sec_value)
+        if _is_nan(fv) or fv <= 0:
+            return
+        mmss = _mmss_str(fv)
+        st_container.caption(f"前回値：{mmss}（{int(round(fv))} sec）")
+    except Exception:
+        return
+
+
 # ======================
 # portfolio UI（固定入力）
 #  - checkbox廃止
 #  - 0は保存しない（空白扱い）
 #  - 前回値表示
+#  - 1500/3000は「分＋秒」入力 → 保存時に秒へ変換
 # ======================
 def render_portfolio_fixed(st, storage):
     st.subheader("ポートフォリオ（実績/成長記録）")
@@ -218,6 +277,8 @@ def render_portfolio_fixed(st, storage):
     default_meet = _latest_non_empty(dfp, "track_meet")
 
     cc1, cc2, cc3 = st.columns(3)
+
+    # 100m は秒（小数）でOK
     run_100 = cc1.number_input(
         "100m (sec)",
         min_value=0.0,
@@ -228,25 +289,61 @@ def render_portfolio_fixed(st, storage):
     )
     _prev_caption(cc1, default_100)
 
-    run_1500 = cc2.number_input(
-        "1500m (sec)",
-        min_value=0.0,
-        max_value=99999.0,
-        value=_num_default(default_1500, 0.0),
-        step=0.1,
-        key="pf_run_1500",
-    )
-    _prev_caption(cc2, default_1500)
+    # 1500m / 3000m は分＋秒入力
+    d1500_m, d1500_s = _sec_to_min_sec(default_1500)
+    d3000_m, d3000_s = _sec_to_min_sec(default_3000)
 
-    run_3000 = cc3.number_input(
-        "3000m (sec)",
-        min_value=0.0,
-        max_value=99999.0,
-        value=_num_default(default_3000, 0.0),
-        step=0.1,
-        key="pf_run_3000",
+    cc2.markdown("**1500m (min:sec)**")
+    m1500, s1500 = cc2.columns([1, 1])
+    run_1500_min = m1500.number_input(
+        "分",
+        min_value=0,
+        max_value=999,
+        value=int(d1500_m),
+        step=1,
+        key="pf_run_1500_min",
+        label_visibility="visible",
     )
-    _prev_caption(cc3, default_3000)
+    run_1500_sec = s1500.number_input(
+        "秒",
+        min_value=0,
+        max_value=59,
+        value=int(d1500_s),
+        step=1,
+        key="pf_run_1500_sec",
+        label_visibility="visible",
+    )
+    _prev_time_caption(cc2, default_1500)
+
+    cc3.markdown("**3000m (min:sec)**")
+    m3000, s3000 = cc3.columns([1, 1])
+    run_3000_min = m3000.number_input(
+        "分 ",
+        min_value=0,
+        max_value=999,
+        value=int(d3000_m),
+        step=1,
+        key="pf_run_3000_min",
+        label_visibility="visible",
+    )
+    run_3000_sec = s3000.number_input(
+        "秒 ",
+        min_value=0,
+        max_value=59,
+        value=int(d3000_s),
+        step=1,
+        key="pf_run_3000_sec",
+        label_visibility="visible",
+    )
+    _prev_time_caption(cc3, default_3000)
+
+    # 保存用（秒に統一）
+    run_1500_total = int(run_1500_min) * 60 + int(run_1500_sec)
+    run_3000_total = int(run_3000_min) * 60 + int(run_3000_sec)
+
+    # 目視用の現在値表示（任意）
+    cc2.caption(f"入力値：{run_1500_min}:{int(run_1500_sec):02d}（{run_1500_total} sec）" if run_1500_total > 0 else "入力値：—")
+    cc3.caption(f"入力値：{run_3000_min}:{int(run_3000_sec):02d}（{run_3000_total} sec）" if run_3000_total > 0 else "入力値：—")
 
     track_meet = st.text_input(
         "陸上大会名（任意）",
@@ -422,10 +519,12 @@ def render_portfolio_fixed(st, storage):
 
         if run_100 != 0:
             row["run_100m_sec"] = float(run_100)
-        if run_1500 != 0:
-            row["run_1500m_sec"] = float(run_1500)
-        if run_3000 != 0:
-            row["run_3000m_sec"] = float(run_3000)
+
+        # 1500/3000：分秒 → 秒
+        if run_1500_total != 0:
+            row["run_1500m_sec"] = float(run_1500_total)
+        if run_3000_total != 0:
+            row["run_3000m_sec"] = float(run_3000_total)
 
         if str(track_meet).strip():
             row["track_meet"] = str(track_meet).strip()
