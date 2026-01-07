@@ -40,36 +40,114 @@ a, button { font-size: 20px !important; }
 
 # ======================
 # helper（最新の「値」を拾う）
+#  - 0は「無効値（空白と同等）」として扱う
 # ======================
+def _is_blank_like(v):
+    if v is None:
+        return True
+    if isinstance(v, str):
+        s = v.strip()
+        return s == "" or s.lower() in ["nan", "none"]
+    if isinstance(v, (int, float)):
+        try:
+            return float(v) == 0.0
+        except Exception:
+            return False
+    return False
+
+
 def _latest_non_empty(df, col):
+    """
+    末尾から遡って、最初に見つかった「空でない値」を返す。
+    ※ここでの「空でない」は 0 を除外（0は無効値扱い）
+    """
     if df is None or df.empty or col not in df.columns:
         return None
+
     s = df[col]
-    # 文字列の空を除外
+    # object（文字列など）
     if s.dtype == object:
-        s2 = s.astype(str).replace("nan", "").replace("None", "")
-        s2 = s2[s2.str.strip() != ""]
+        vals = s.astype(str).tolist()
+        for v in reversed(vals):
+            vv = str(v).strip()
+            if vv.lower() in ["nan", "none"]:
+                vv = ""
+            # "0" も無効扱い
+            if vv == "" or vv == "0" or vv == "0.0":
+                continue
+            return vv
+        return None
+
+    # 数値
+    try:
+        vals = s.tolist()
+        for v in reversed(vals):
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except Exception:
+                continue
+            if fv == 0.0:
+                continue
+            return fv
+        return None
+    except Exception:
+        # 念のため
+        s2 = s.dropna()
         if s2.empty:
             return None
-        return s2.iloc[-1]
-    # 数値
-    s2 = s.dropna()
-    if s2.empty:
+        # 最後が0の可能性があるので遡る
+        for v in reversed(s2.tolist()):
+            try:
+                if float(v) != 0.0:
+                    return v
+            except Exception:
+                continue
         return None
-    return s2.iloc[-1]
 
 
 def _latest_bool(df, col):
     v = _latest_non_empty(df, col)
     if v is None:
+        # boolは 0扱いではないので、ここは False をデフォルト
         return False
     if isinstance(v, bool):
         return v
     return str(v).strip().lower() in ["true", "1", "yes", "y", "on"]
 
 
+def _prev_caption(st, v):
+    """前回値：表示（0/空は表示しない）"""
+    if _is_blank_like(v):
+        return
+    st.caption(f"前回値：{v}")
+
+
+def _num_default(v, fallback=0.0):
+    """前回値をデフォルトに入れる（0/空ならfallback=0）"""
+    if _is_blank_like(v):
+        return float(fallback)
+    try:
+        return float(v)
+    except Exception:
+        return float(fallback)
+
+
+def _text_default(v, fallback=""):
+    if v is None:
+        return fallback
+    s = str(v).strip()
+    if s == "" or s.lower() in ["nan", "none"]:
+        return fallback
+    return s
+
+
 # ======================
 # portfolio UI（固定入力）
+#  - checkbox廃止
+#  - 0は保存しない（空白扱い）
+#  - 前回値表示
 # ======================
 def render_portfolio_fixed(st, storage):
     st.subheader("ポートフォリオ（実績/成長記録）")
@@ -93,7 +171,9 @@ def render_portfolio_fixed(st, storage):
     st.markdown("### ① 基本")
     selected_date = st.date_input("日付", value=date.today(), key="pf_date")
 
-    # ブロック ② 体（身長/体重）
+    # ----------------------
+    # ② 体（身長/体重）
+    # ----------------------
     st.markdown("### ② 体（body）")
     c1, c2 = st.columns(2)
 
@@ -104,29 +184,33 @@ def render_portfolio_fixed(st, storage):
         "身長 (cm)",
         min_value=0.0,
         max_value=250.0,
-        value=float(default_height) if default_height is not None else 0.0,
+        value=_num_default(default_height, 0.0),
         step=0.1,
         key="pf_height_cm",
     )
-    use_height = c1.checkbox("この値を使う（OFFなら空）", value=False, key="pf_use_height")
+    _prev_caption(c1, default_height)
 
     weight_kg = c2.number_input(
         "体重 (kg)",
         min_value=0.0,
         max_value=200.0,
-        value=float(default_weight) if default_weight is not None else 0.0,
+        value=_num_default(default_weight, 0.0),
         step=0.1,
         key="pf_weight_kg",
     )
-    use_weight = c2.checkbox("この値を使う（OFFなら空）", value=False, key="pf_use_weight")
+    _prev_caption(c2, default_weight)
 
     # BMI 表示（保存は Sheets 側計算でもOK）
     bmi_preview = None
-    if use_height and use_weight and height_cm > 0 and weight_kg > 0:
+    if height_cm > 0 and weight_kg > 0:
         bmi_preview = weight_kg / ((height_cm / 100.0) ** 2)
         st.caption(f"BMI（参考）: {bmi_preview:.2f}  ※保存はシート数式でもOK")
+    else:
+        st.caption("BMI（参考）: —  ※保存はシート数式でもOK")
 
-    # ブロック ③ 陸上（タイム）
+    # ----------------------
+    # ③ 陸上（タイム）
+    # ----------------------
     st.markdown("### ③ 陸上（track）")
     default_100 = _latest_non_empty(dfp, "run_100m_sec")
     default_1500 = _latest_non_empty(dfp, "run_1500m_sec")
@@ -138,39 +222,41 @@ def render_portfolio_fixed(st, storage):
         "100m (sec)",
         min_value=0.0,
         max_value=9999.0,
-        value=float(default_100) if default_100 is not None else 0.0,
+        value=_num_default(default_100, 0.0),
         step=0.01,
         key="pf_run_100",
     )
-    use_100 = cc1.checkbox("この値を使う（OFFなら空）", value=False, key="pf_use_100")
+    _prev_caption(cc1, default_100)
 
     run_1500 = cc2.number_input(
         "1500m (sec)",
         min_value=0.0,
         max_value=99999.0,
-        value=float(default_1500) if default_1500 is not None else 0.0,
+        value=_num_default(default_1500, 0.0),
         step=0.1,
         key="pf_run_1500",
     )
-    use_1500 = cc2.checkbox("この値を使う（OFFなら空）", value=False, key="pf_use_1500")
+    _prev_caption(cc2, default_1500)
 
     run_3000 = cc3.number_input(
         "3000m (sec)",
         min_value=0.0,
         max_value=99999.0,
-        value=float(default_3000) if default_3000 is not None else 0.0,
+        value=_num_default(default_3000, 0.0),
         step=0.1,
         key="pf_run_3000",
     )
-    use_3000 = cc3.checkbox("この値を使う（OFFなら空）", value=False, key="pf_use_3000")
+    _prev_caption(cc3, default_3000)
 
     track_meet = st.text_input(
         "陸上大会名（任意）",
-        value=str(default_meet) if default_meet is not None else "",
+        value=_text_default(default_meet, ""),
         key="pf_track_meet",
     )
 
-    # ブロック ④ 学業（テスト）
+    # ----------------------
+    # ④ 学業（テスト）
+    # ----------------------
     st.markdown("### ④ 学業（school）")
     default_rank = _latest_non_empty(dfp, "rank")
     default_dev = _latest_non_empty(dfp, "deviation")
@@ -186,59 +272,86 @@ def render_portfolio_fixed(st, storage):
         "順位 (rank)",
         min_value=0.0,
         max_value=99999.0,
-        value=float(default_rank) if default_rank is not None else 0.0,
+        value=_num_default(default_rank, 0.0),
         step=1.0,
         key="pf_rank",
     )
-    use_rank = s1.checkbox("この値を使う（OFFなら空）", value=False, key="pf_use_rank")
+    _prev_caption(s1, default_rank)
 
     deviation = s2.number_input(
         "偏差値 (deviation)",
         min_value=0.0,
         max_value=100.0,
-        value=float(default_dev) if default_dev is not None else 0.0,
+        value=_num_default(default_dev, 0.0),
         step=0.1,
         key="pf_deviation",
     )
-    use_deviation = s2.checkbox("この値を使う（OFFなら空）", value=False, key="pf_use_deviation")
+    _prev_caption(s2, default_dev)
 
     rating = s3.number_input(
         "評点 (rating)",
         min_value=0.0,
         max_value=999.0,
-        value=float(default_rating) if default_rating is not None else 0.0,
+        value=_num_default(default_rating, 0.0),
         step=0.1,
         key="pf_rating",
     )
-    use_rating = s3.checkbox("この値を使う（OFFなら空）", value=False, key="pf_use_rating")
+    _prev_caption(s3, default_rating)
 
     t1, t2, t3, t4, t5 = st.columns(5)
-    score_jp = t1.number_input("国語", min_value=0.0, max_value=200.0,
-                               value=float(default_jp) if default_jp is not None else 0.0,
-                               step=1.0, key="pf_score_jp")
-    use_jp = t1.checkbox("使う", value=False, key="pf_use_jp")
+    score_jp = t1.number_input(
+        "国語",
+        min_value=0.0,
+        max_value=200.0,
+        value=_num_default(default_jp, 0.0),
+        step=1.0,
+        key="pf_score_jp",
+    )
+    _prev_caption(t1, default_jp)
 
-    score_math = t2.number_input("数学", min_value=0.0, max_value=200.0,
-                                 value=float(default_math) if default_math is not None else 0.0,
-                                 step=1.0, key="pf_score_math")
-    use_math = t2.checkbox("使う", value=False, key="pf_use_math")
+    score_math = t2.number_input(
+        "数学",
+        min_value=0.0,
+        max_value=200.0,
+        value=_num_default(default_math, 0.0),
+        step=1.0,
+        key="pf_score_math",
+    )
+    _prev_caption(t2, default_math)
 
-    score_en = t3.number_input("英語", min_value=0.0, max_value=200.0,
-                               value=float(default_en) if default_en is not None else 0.0,
-                               step=1.0, key="pf_score_en")
-    use_en = t3.checkbox("使う", value=False, key="pf_use_en")
+    score_en = t3.number_input(
+        "英語",
+        min_value=0.0,
+        max_value=200.0,
+        value=_num_default(default_en, 0.0),
+        step=1.0,
+        key="pf_score_en",
+    )
+    _prev_caption(t3, default_en)
 
-    score_sci = t4.number_input("理科", min_value=0.0, max_value=200.0,
-                                value=float(default_sci) if default_sci is not None else 0.0,
-                                step=1.0, key="pf_score_sci")
-    use_sci = t4.checkbox("使う", value=False, key="pf_use_sci")
+    score_sci = t4.number_input(
+        "理科",
+        min_value=0.0,
+        max_value=200.0,
+        value=_num_default(default_sci, 0.0),
+        step=1.0,
+        key="pf_score_sci",
+    )
+    _prev_caption(t4, default_sci)
 
-    score_soc = t5.number_input("社会", min_value=0.0, max_value=200.0,
-                                value=float(default_soc) if default_soc is not None else 0.0,
-                                step=1.0, key="pf_score_soc")
-    use_soc = t5.checkbox("使う", value=False, key="pf_use_soc")
+    score_soc = t5.number_input(
+        "社会",
+        min_value=0.0,
+        max_value=200.0,
+        value=_num_default(default_soc, 0.0),
+        step=1.0,
+        key="pf_score_soc",
+    )
+    _prev_caption(t5, default_soc)
 
-    # ブロック ⑤ サッカー（実績）
+    # ----------------------
+    # ⑤ サッカー（実績）
+    # ----------------------
     st.markdown("### ⑤ サッカー（soccer）")
     default_tcenter = _latest_bool(dfp, "tcenter")
     default_soc_tour = _latest_non_empty(dfp, "soccer_tournament")
@@ -247,85 +360,95 @@ def render_portfolio_fixed(st, storage):
     default_vnote = _latest_non_empty(dfp, "video_note")
 
     tcenter = st.checkbox("トレセン（tcenter）", value=default_tcenter, key="pf_tcenter")
+
     soccer_tournament = st.text_input(
         "サッカー大会名（任意）",
-        value=str(default_soc_tour) if default_soc_tour is not None else "",
+        value=_text_default(default_soc_tour, ""),
         key="pf_soccer_tournament",
     )
+
     match_result = st.text_input(
         "試合実績（match_result）",
-        value=str(default_match) if default_match is not None else "",
+        value=_text_default(default_match, ""),
         key="pf_match_result",
     )
 
     v1, v2 = st.columns(2)
     video_url = v1.text_input(
         "動画URL（video_url）",
-        value=str(default_url) if default_url is not None else "",
+        value=_text_default(default_url, ""),
         key="pf_video_url",
     )
     video_note = v2.text_input(
         "動画備考（video_note）",
-        value=str(default_vnote) if default_vnote is not None else "",
+        value=_text_default(default_vnote, ""),
         key="pf_video_note",
     )
 
-    # ブロック ⑥ 自由記述
+    # ----------------------
+    # ⑥ 自由記述
+    # ----------------------
     st.markdown("### ⑥ 自由記述（note）")
     default_note = _latest_non_empty(dfp, "note")
     note = st.text_area(
         "メモ（note）",
-        value=str(default_note) if default_note is not None else "",
+        value=_text_default(default_note, ""),
         height=120,
         key="pf_note",
     )
 
     st.divider()
 
+    # ======================
     # 保存（行追加）
+    # ルール：
+    # - 数値は「0なら保存しない（空白扱い）」
+    # - 文字列は空なら保存しない
+    # - tcenter は履歴として残すため常に保存（False/True）
+    # - bmi は基本保存しない（Sheets数式運用）
+    # ======================
     if st.button("保存（行追加）", type="primary", use_container_width=True):
         row = {"date": str(selected_date)}
 
-        # 空白はスルー（B-1）
-        if use_height:
+        # 数値：0は保存しない
+        if height_cm != 0:
             row["height_cm"] = float(height_cm)
-        if use_weight:
+        if weight_kg != 0:
             row["weight_kg"] = float(weight_kg)
 
-        # bmi：ここは「保存しない（空）」を基本にする（Sheets数式運用向け）
-        # もし app 側計算で保存したい場合は下を有効に:
+        # bmi：保存しない（Sheets側の式でOK）
         # if bmi_preview is not None:
         #     row["bmi"] = float(bmi_preview)
 
-        if use_100:
+        if run_100 != 0:
             row["run_100m_sec"] = float(run_100)
-        if use_1500:
+        if run_1500 != 0:
             row["run_1500m_sec"] = float(run_1500)
-        if use_3000:
+        if run_3000 != 0:
             row["run_3000m_sec"] = float(run_3000)
 
         if str(track_meet).strip():
             row["track_meet"] = str(track_meet).strip()
 
-        if use_rank:
+        if rank != 0:
             row["rank"] = float(rank)
-        if use_deviation:
+        if deviation != 0:
             row["deviation"] = float(deviation)
-        if use_rating:
+        if rating != 0:
             row["rating"] = float(rating)
 
-        if use_jp:
+        if score_jp != 0:
             row["score_jp"] = float(score_jp)
-        if use_math:
+        if score_math != 0:
             row["score_math"] = float(score_math)
-        if use_en:
+        if score_en != 0:
             row["score_en"] = float(score_en)
-        if use_sci:
+        if score_sci != 0:
             row["score_sci"] = float(score_sci)
-        if use_soc:
+        if score_soc != 0:
             row["score_soc"] = float(score_soc)
 
-        # tcenter は値があるので常に入れる（False/True が履歴として残る）
+        # tcenter は常に保存（False/True）
         row["tcenter"] = bool(tcenter)
 
         if str(soccer_tournament).strip():
@@ -339,15 +462,14 @@ def render_portfolio_fixed(st, storage):
         if str(note).strip():
             row["note"] = str(note).strip()
 
-        # 「date と tcenter だけ」みたいな保存もあり得るが、
-        # 事故防止のため、ほぼ空の場合は警告
+        # 事故防止：date 以外に何も無い場合は保存しない
         meaningful = [k for k in row.keys() if k not in ["date"]]
         if len(meaningful) == 0:
             st.warning("保存する値がありません（全て空欄）")
         else:
             storage.append_portfolio_row(row)
             st.success("保存しました（行追加）")
-            st.caption("※最新『行』ではなく、集計側では列ごとに最新『値』を採用してください")
+            st.caption("※集計側は『最新行』ではなく、列ごとに最新『値』を採用してください")
 
 
 # ======================

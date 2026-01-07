@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 import pandas as pd
 import os
 
@@ -248,9 +248,41 @@ class SheetsStorage(BaseStorage):
             return False, f"portfolio 接続NG: {e}"
 
     def _ensure_portfolio_header(self, ws):
+        """
+        A1 が空ならヘッダを書き込み。
+        既にヘッダがある場合は「一致してるか」を軽くチェックして、
+        おかしければ警告（自動修復はしない：事故防止）。
+        """
         a1 = ws.acell("A1").value
         if not a1:
             ws.append_row(PORTFOLIO_COLUMNS, value_input_option="USER_ENTERED")
+            return
+
+        # 既存ヘッダの整合チェック（安全のため警告のみ）
+        try:
+            header = ws.row_values(1)
+            # row_values は末尾の空セルを省略することがあるので、先頭一致で見る
+            if header[: len(PORTFOLIO_COLUMNS)] != PORTFOLIO_COLUMNS:
+                # Streamlit に警告を出す（storage内だが st を持っているので可能）
+                self.st.warning(
+                    "portfolio シートのヘッダが想定と一致しません。"
+                    "（列ズレの可能性）シート1行目を PORTFOLIO_COLUMNS に合わせてください。"
+                )
+        except Exception:
+            # チェックできなくても動作は継続
+            pass
+
+    def _safe_cell_value(self, v: Any):
+        """gspread に渡す値の安全化（None/NaNなどを空に）"""
+        if v is None:
+            return ""
+        # pandas / numpy の NaN 対策
+        try:
+            if pd.isna(v):
+                return ""
+        except Exception:
+            pass
+        return v
 
     def append_portfolio_row(self, row: Dict[str, Any]) -> None:
         """
@@ -261,12 +293,9 @@ class SheetsStorage(BaseStorage):
         ws = self._ws_portfolio()
         self._ensure_portfolio_header(ws)
 
-        # columns 順に並べる（無いものは空）
         values = []
         for c in PORTFOLIO_COLUMNS:
-            v = row.get(c, "")
-            if v is None:
-                v = ""
+            v = self._safe_cell_value(row.get(c, ""))
             values.append(v)
 
         ws.append_row(values, value_input_option="USER_ENTERED")

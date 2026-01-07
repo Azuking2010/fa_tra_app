@@ -1,81 +1,162 @@
-# modules/portfolio_storage.py
+# portfolio_storage.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from modules.portfolio_utils import (
-    PORTFOLIO_COLUMNS,
-    build_bmi_formula,
-    df_from_sheet_values,
-    ensure_header_exact,
-)
+
+PORTFOLIO_SHEET_NAME = "portfolio"
+
+# あなたの確定ヘッダ
+PORTFOLIO_COLUMNS: List[str] = [
+    "date",
+    "height_cm",
+    "weight_kg",
+    "bmi",
+    "run_100m_sec",
+    "run_1500m_sec",
+    "run_3000m_sec",
+    "track_meet",
+    "rank",
+    "deviation",
+    "score_jp",
+    "score_math",
+    "score_en",
+    "score_sci",
+    "score_soc",
+    "rating",
+    "tcenter",
+    "soccer_tournament",
+    "match_result",
+    "video_url",
+    "video_note",
+    "note",
+]
+
+
+def _is_blank_like(v: Any) -> bool:
+    """空欄扱いの判定（保存・前回値探索に共通で使う）"""
+    if v is None:
+        return True
+    if isinstance(v, str):
+        s = v.strip()
+        return s == "" or s.lower() == "nan"
+    # 0を空欄扱いにする（あなたの方針）
+    if isinstance(v, (int, float)):
+        return float(v) == 0.0
+    return False
 
 
 @dataclass
-class PortfolioSheetsStorage:
-    st: Any
+class PortfolioStorage:
+    """
+    Sheets接続の薄いラッパ。
+    既存のSheets接続（gspreadやgoogle-api）に合わせて
+    _get_worksheet() を差し替えて使ってください。
+    """
+
+    sheets_client: Any
     spreadsheet_id: str
-    worksheet_name: str  # "portfolio"
+    worksheet_name: str = PORTFOLIO_SHEET_NAME
 
-    def _client(self):
-        import gspread
-        from google.oauth2.service_account import Credentials
-
-        sa_info = dict(self.st.secrets["gcp_service_account"])
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ]
-        creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
-        return gspread.authorize(creds)
-
-    def _ws(self):
-        gc = self._client()
-        sh = gc.open_by_key(self.spreadsheet_id)
+    def _get_worksheet(self):
+        # gspread想定（既存実装に合わせて調整してOK）
+        sh = self.sheets_client.open_by_key(self.spreadsheet_id)
         return sh.worksheet(self.worksheet_name)
 
-    def healthcheck(self) -> Tuple[bool, str]:
-        try:
-            ws = self._ws()
-            _ = ws.acell("A1").value
-            ensure_header_exact(ws)
-            return True, f"{self.worksheet_name} シートに接続OK"
-        except Exception as e:
-            return False, f"portfolio Sheets 接続NG: {e}"
-
-    def load_all(self) -> pd.DataFrame:
-        ws = self._ws()
-        ensure_header_exact(ws)
+    def ensure_header(self) -> None:
+        ws = self._get_worksheet()
         values = ws.get_all_values()
-        return df_from_sheet_values(values)
+        if not values:
+            ws.append_row(PORTFOLIO_COLUMNS)
+            return
+        header = values[0]
+        if header != PORTFOLIO_COLUMNS:
+            # 既存ヘッダが違う場合は安全のため例外
+            raise ValueError(
+                f"portfolio header mismatch.\n"
+                f"expected={PORTFOLIO_COLUMNS}\n"
+                f"actual={header}"
+            )
 
-    def append_row(self, row_dict: Dict[str, Any]) -> None:
-        """
-        空白はそのまま空で保存（＝B-1方針）。
-        bmi は保存時に数式を入れる（身長・体重が空なら空が表示される）。
-        """
-        ws = self._ws()
-        ensure_header_exact(ws)
+    def read_df(self) -> pd.DataFrame:
+        ws = self._get_worksheet()
+        values = ws.get_all_values()
+        if len(values) <= 1:
+            return pd.DataFrame(columns=PORTFOLIO_COLUMNS)
 
-        # 追加前の行数（ヘッダー含む）
-        values_before = ws.get_all_values()
-        next_row_index = len(values_before) + 1  # 1-based row number
+        header = values[0]
+        data = values[1:]
+        df = pd.DataFrame(data, columns=header)
 
-        # シートに書く並びを固定
-        row_values: List[Any] = []
+        # 数値列を数値化（失敗はNaN）
+        numeric_cols = [
+            "height_cm",
+            "weight_kg",
+            "bmi",
+            "run_100m_sec",
+            "run_1500m_sec",
+            "run_3000m_sec",
+            "rank",
+            "deviation",
+            "score_jp",
+            "score_math",
+            "score_en",
+            "score_sci",
+            "score_soc",
+            "rating",
+        ]
+        for c in numeric_cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        # bool列（tcenter）
+        if "tcenter" in df.columns:
+            # Sheets上のTRUE/FALSEや空を想定
+            df["tcenter"] = df["tcenter"].astype(str).str.upper().map(
+                {"TRUE": True, "FALSE": False}
+            )
+
+        return df
+
+    def append_row(self, row: Dict[str, Any]) -> None:
+        """rowは PORTFOLIO_COLUMNS をキーに持つ dict を想定"""
+        ws = self._get_worksheet()
+
+        out: List[Any] = []
         for col in PORTFOLIO_COLUMNS:
-            if col == "bmi":
-                row_values.append("")  # まず空でOK（後から数式を入れる）
+            v = row.get(col, "")
+            # 0は空白扱い（あなたの仕様）
+            if _is_blank_like(v):
+                out.append("")
             else:
-                v = row_dict.get(col, "")
-                row_values.append("" if v is None else v)
+                out.append(v)
+        ws.append_row(out, value_input_option="USER_ENTERED")
 
-        ws.append_row(row_values, value_input_option="USER_ENTERED")
+    def get_latest_values(self) -> Dict[str, Any]:
+        """
+        列ごとに「最新の“値”」を返す。
+        “最新行”ではなく、下から見て最初に見つかった非空(≠0)。
+        """
+        df = self.read_df()
+        if df.empty:
+            return {}
 
-        # bmi 数式を D列に入れる（列順は固定なので bmi は4列目= D）
-        # ただし、身長/体重が空ならIFで空になる
-        bmi_formula = build_bmi_formula(next_row_index)
-        ws.update_acell(f"D{next_row_index}", bmi_formula)
+        latest: Dict[str, Any] = {}
+        # 下から探索（最新行から過去へ）
+        for col in PORTFOLIO_COLUMNS:
+            if col == "date":
+                continue
+            if col not in df.columns:
+                continue
+
+            series = df[col]
+            # object列は str / 空が混じるので、そのまま判定
+            for v in reversed(series.tolist()):
+                if not _is_blank_like(v):
+                    latest[col] = v
+                    break
+
+        return latest
