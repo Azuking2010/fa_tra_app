@@ -280,7 +280,7 @@ def render_portfolio_fixed(st, storage):
 
     # 100m は秒（小数）でOK
     run_100 = cc1.number_input(
-        "100m (sec)",
+        "50m (sec)",
         min_value=0.0,
         max_value=9999.0,
         value=_num_default(default_100, 0.0),
