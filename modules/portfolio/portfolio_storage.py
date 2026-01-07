@@ -1,108 +1,81 @@
+# modules/portfolio_storage.py
 from __future__ import annotations
 
-from datetime import datetime
-from typing import List, Tuple, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 
-
-PORTFOLIO_SHEET_NAME = "portfolio"
-PORTFOLIO_COLUMNS = [
-    "date",
-    "category",
-    "metric",
-    "value_num",
-    "value_text",
-    "unit",
-    "title",
-    "tags",
-    "visibility",
-    "url",
-    "memo",
-    "created_at",
-    "updated_at",
-]
+from modules.portfolio_utils import (
+    PORTFOLIO_COLUMNS,
+    build_bmi_formula,
+    df_from_sheet_values,
+    ensure_header_exact,
+)
 
 
-class PortfolioStorage:
-    """
-    既存 storage を“土台”にして、同じ Spreadsheet 内の portfolio シートを操作する。
-    - Sheets接続（secretsあり）のときだけ動かす
-    - CSV fallback 時は誤更新防止のため停止（必要なら後でCSV版を作る）
-    """
+@dataclass
+class PortfolioSheetsStorage:
+    st: Any
+    spreadsheet_id: str
+    worksheet_name: str  # "portfolio"
 
-    def __init__(self, base_storage):
-        self.base = base_storage
+    def _client(self):
+        import gspread
+        from google.oauth2.service_account import Credentials
 
-    def is_sheets_mode(self) -> bool:
-        info = self.base.get_info() or {}
-        # spreadsheet_id があれば Sheets と判断
-        return "spreadsheet_id" in info
+        sa_info = dict(self.st.secrets["gcp_service_account"])
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
+        return gspread.authorize(creds)
 
-    def _get_sheet(self):
-        """
-        base_storage が内部で gspread を使っている前提で、
-        - base_storage に gspread client を返す関数が無い場合でも、
-          base_storage 側の実装に依存しないように “最低限の口” を用意している想定。
-        もしここで落ちる場合は、base_storage の中身に合わせて調整する。
-        """
-        # ✅ まず、base_storage に “get_spreadsheet()” がある想定（無ければ後で合わせる）
-        if not hasattr(self.base, "get_spreadsheet"):
-            raise RuntimeError("storage に get_spreadsheet() がありません。modules/storage.py 側に追加が必要です。")
+    def _ws(self):
+        gc = self._client()
+        sh = gc.open_by_key(self.spreadsheet_id)
+        return sh.worksheet(self.worksheet_name)
 
-        ss = self.base.get_spreadsheet()
+    def healthcheck(self) -> Tuple[bool, str]:
         try:
-            ws = ss.worksheet(PORTFOLIO_SHEET_NAME)
-        except Exception:
-            ws = ss.add_worksheet(title=PORTFOLIO_SHEET_NAME, rows=2000, cols=len(PORTFOLIO_COLUMNS))
-            ws.append_row(PORTFOLIO_COLUMNS)
-        return ws
+            ws = self._ws()
+            _ = ws.acell("A1").value
+            ensure_header_exact(ws)
+            return True, f"{self.worksheet_name} シートに接続OK"
+        except Exception as e:
+            return False, f"portfolio Sheets 接続NG: {e}"
 
-    def ensure_header(self) -> Tuple[bool, str]:
-        if not self.is_sheets_mode():
-            return False, "Sheets接続ではないため portfolio は無効（CSV fallback）"
-
-        ws = self._get_sheet()
-        header = ws.row_values(1)
-        if header != PORTFOLIO_COLUMNS:
-            # ヘッダが違う場合は安全のため止める（自動修正は事故りやすい）
-            return False, f"portfolio シートのヘッダが想定と違います。1行目を {PORTFOLIO_COLUMNS} にしてください。"
-        return True, "portfolio シートOK"
-
-    def append_rows(self, rows: List[dict]) -> None:
-        ok, msg = self.ensure_header()
-        if not ok:
-            raise RuntimeError(msg)
-
-        ws = self._get_sheet()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        out = []
-        for r in rows:
-            rr = dict(r)
-            rr["created_at"] = rr.get("created_at") or now
-            rr["updated_at"] = rr.get("updated_at") or now
-            out.append([rr.get(c, "") for c in PORTFOLIO_COLUMNS])
-
-        # まとめて追記
-        ws.append_rows(out, value_input_option="USER_ENTERED")
-
-    def load_df(self) -> pd.DataFrame:
-        ok, msg = self.ensure_header()
-        if not ok:
-            raise RuntimeError(msg)
-
-        ws = self._get_sheet()
+    def load_all(self) -> pd.DataFrame:
+        ws = self._ws()
+        ensure_header_exact(ws)
         values = ws.get_all_values()
-        if len(values) <= 1:
-            return pd.DataFrame(columns=PORTFOLIO_COLUMNS)
+        return df_from_sheet_values(values)
 
-        header = values[0]
-        data = values[1:]
-        df = pd.DataFrame(data, columns=header)
+    def append_row(self, row_dict: Dict[str, Any]) -> None:
+        """
+        空白はそのまま空で保存（＝B-1方針）。
+        bmi は保存時に数式を入れる（身長・体重が空なら空が表示される）。
+        """
+        ws = self._ws()
+        ensure_header_exact(ws)
 
-        # 型寄せ
-        if "value_num" in df.columns:
-            df["value_num"] = pd.to_numeric(df["value_num"], errors="coerce")
+        # 追加前の行数（ヘッダー含む）
+        values_before = ws.get_all_values()
+        next_row_index = len(values_before) + 1  # 1-based row number
 
-        return df
+        # シートに書く並びを固定
+        row_values: List[Any] = []
+        for col in PORTFOLIO_COLUMNS:
+            if col == "bmi":
+                row_values.append("")  # まず空でOK（後から数式を入れる）
+            else:
+                v = row_dict.get(col, "")
+                row_values.append("" if v is None else v)
+
+        ws.append_row(row_values, value_input_option="USER_ENTERED")
+
+        # bmi 数式を D列に入れる（列順は固定なので bmi は4列目= D）
+        # ただし、身長/体重が空ならIFで空になる
+        bmi_formula = build_bmi_formula(next_row_index)
+        ws.update_acell(f"D{next_row_index}", bmi_formula)
