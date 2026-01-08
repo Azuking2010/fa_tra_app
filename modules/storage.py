@@ -60,6 +60,42 @@ PORTFOLIO_NUMERIC_COLS = [
 ]
 
 
+# =========================
+# helper：portfolio を date で安定ソート
+# - date昇順（古→新）
+# - 同一dateは元の順序を維持（mergesort）
+# - date不正/空は最後
+# =========================
+def _sort_portfolio_by_date(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    if "date" not in df.columns:
+        # 念のため（date列が無いケース）
+        return df
+
+    # 文字列の空/None/"nan" を空扱い
+    s = df["date"].astype(str).replace("nan", "").replace("None", "").str.strip()
+
+    # YYYY-MM-DD を想定してパース（失敗はNaT）
+    dt = pd.to_datetime(s, errors="coerce", format="%Y-%m-%d")
+
+    out = df.copy()
+    out["_date_parsed"] = dt
+
+    # mergesort は stable（同一キーの相対順序が保たれる）
+    out = out.sort_values(
+        by=["_date_parsed"],
+        ascending=True,
+        na_position="last",
+        kind="mergesort",
+    ).drop(columns=["_date_parsed"])
+
+    # index は整えておく（見やすさ＆後続処理安定）
+    out = out.reset_index(drop=True)
+    return out
+
+
 class BaseStorage:
     # ===== log =====
     def healthcheck(self) -> Tuple[bool, str]:
@@ -87,6 +123,7 @@ class BaseStorage:
         raise NotImplementedError
 
     def load_all_portfolio(self) -> pd.DataFrame:
+        # 既定：空DF
         return pd.DataFrame(columns=PORTFOLIO_COLUMNS)
 
 
@@ -138,11 +175,32 @@ class CSVStorage(BaseStorage):
         return
 
     def load_all_portfolio(self) -> pd.DataFrame:
+        """
+        CSVでも読みだけは可能だが、現方針では UI からは無効。
+        念のため date ソート仕様は揃えておく。
+        """
         self._ensure_portfolio()
         try:
-            return pd.read_csv(self.portfolio_path, encoding="utf-8-sig")
+            df = pd.read_csv(self.portfolio_path, encoding="utf-8-sig")
         except Exception:
-            return pd.read_csv(self.portfolio_path, encoding="utf-8")
+            df = pd.read_csv(self.portfolio_path, encoding="utf-8")
+
+        # 欠けてる列があっても落ちないように補完
+        for c in PORTFOLIO_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+
+        # numeric
+        for c in PORTFOLIO_NUMERIC_COLS:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        # boolean
+        if "tcenter" in df.columns:
+            df["tcenter"] = df["tcenter"].astype(str).str.lower().isin(["true", "1", "yes", "y", "on"])
+
+        df = df[PORTFOLIO_COLUMNS]
+        return _sort_portfolio_by_date(df)
 
 
 @dataclass
@@ -263,20 +321,17 @@ class SheetsStorage(BaseStorage):
             header = ws.row_values(1)
             # row_values は末尾の空セルを省略することがあるので、先頭一致で見る
             if header[: len(PORTFOLIO_COLUMNS)] != PORTFOLIO_COLUMNS:
-                # Streamlit に警告を出す（storage内だが st を持っているので可能）
                 self.st.warning(
                     "portfolio シートのヘッダが想定と一致しません。"
                     "（列ズレの可能性）シート1行目を PORTFOLIO_COLUMNS に合わせてください。"
                 )
         except Exception:
-            # チェックできなくても動作は継続
             pass
 
     def _safe_cell_value(self, v: Any):
         """gspread に渡す値の安全化（None/NaNなどを空に）"""
         if v is None:
             return ""
-        # pandas / numpy の NaN 対策
         try:
             if pd.isna(v):
                 return ""
@@ -301,6 +356,11 @@ class SheetsStorage(BaseStorage):
         ws.append_row(values, value_input_option="USER_ENTERED")
 
     def load_all_portfolio(self) -> pd.DataFrame:
+        """
+        ★重要：date 昇順（古→新）で返す
+        これにより、UI/集計側で「末尾＝date的に最新」を意味するようになる。
+        （同一dateの複数行は追記順を維持）
+        """
         ws = self._ws_portfolio()
         values = ws.get_all_values()
         if not values or len(values) < 2:
@@ -324,7 +384,10 @@ class SheetsStorage(BaseStorage):
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
 
-        return df[PORTFOLIO_COLUMNS]
+        df = df[PORTFOLIO_COLUMNS]
+
+        # ★dateで安定ソート
+        return _sort_portfolio_by_date(df)
 
 
 def build_storage(st) -> BaseStorage:
