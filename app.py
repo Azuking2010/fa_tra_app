@@ -40,8 +40,7 @@ a, button { font-size: 20px !important; }
 
 
 # ======================
-# helper（最新の「値」を拾う）
-#  - 0は「無効値（空白と同等）」として扱う
+# helper（空/0/NaN判定）
 # ======================
 def _is_nan(v) -> bool:
     try:
@@ -51,13 +50,14 @@ def _is_nan(v) -> bool:
 
 
 def _is_blank_like(v):
+    """空/NaN/None/0 を『無効（=空扱い）』にする"""
     if v is None:
         return True
     if _is_nan(v):
         return True
     if isinstance(v, str):
         s = v.strip()
-        return s == "" or s.lower() in ["nan", "none"]
+        return s == "" or s.lower() in ["nan", "none", "null"]
     if isinstance(v, (int, float)):
         try:
             fv = float(v)
@@ -71,20 +71,20 @@ def _is_blank_like(v):
 
 def _latest_non_empty(df, col):
     """
-    末尾から遡って、最初に見つかった「空でない値」を返す。
+    dfの末尾から遡って、最初に見つかった「空でない値」を返す。
     ※ここでの「空でない」は 0 を除外（0は無効値扱い）
-    ※NaN も除外
     """
     if df is None or df.empty or col not in df.columns:
         return None
 
     s = df[col]
+
     # object（文字列など）
     if s.dtype == object:
         vals = s.astype(str).tolist()
         for v in reversed(vals):
             vv = str(v).strip()
-            if vv.lower() in ["nan", "none"]:
+            if vv.lower() in ["nan", "none", "null"]:
                 vv = ""
             # "0" も無効扱い
             if vv == "" or vv == "0" or vv == "0.0":
@@ -109,29 +109,24 @@ def _latest_non_empty(df, col):
             return fv
         return None
     except Exception:
-        # 念のため
-        s2 = s.dropna()
-        if s2.empty:
-            return None
-        for v in reversed(s2.tolist()):
-            try:
-                fv = float(v)
-                if _is_nan(fv):
-                    continue
-                if fv != 0.0:
-                    return fv
-            except Exception:
-                continue
         return None
 
 
 def _latest_bool(df, col):
-    v = _latest_non_empty(df, col)
-    if v is None:
+    """同日の行の中で、最後に出てきた bool を採用（無ければFalse）"""
+    if df is None or df.empty or col not in df.columns:
         return False
-    if isinstance(v, bool):
-        return v
-    return str(v).strip().lower() in ["true", "1", "yes", "y", "on"]
+    # boolは0/1扱いになるケースもあるので、文字列判定に寄せる
+    vals = df[col].tolist()
+    for v in reversed(vals):
+        if v is None:
+            continue
+        s = str(v).strip().lower()
+        if s in ["true", "1", "yes", "y", "on"]:
+            return True
+        if s in ["false", "0", "no", "n", "off"]:
+            return False
+    return False
 
 
 def _prev_caption(st_container, v):
@@ -142,7 +137,7 @@ def _prev_caption(st_container, v):
 
 
 def _num_default(v, fallback=0.0):
-    """前回値をデフォルトに入れる（0/空/NaNならfallback=0）"""
+    """number_input用：未入力（空扱い）の場合は 0 を入れる"""
     if _is_blank_like(v):
         return float(fallback)
     try:
@@ -155,15 +150,16 @@ def _num_default(v, fallback=0.0):
 
 
 def _text_default(v, fallback=""):
+    """text_input/text_area用：未入力（空扱い）の場合は空文字"""
     if v is None:
         return fallback
     s = str(v).strip()
-    if s == "" or s.lower() in ["nan", "none"]:
+    if s == "" or s.lower() in ["nan", "none", "null"]:
         return fallback
     return s
 
 
-def _sec_to_min_sec(total_seconds: float | int | None) -> tuple[int, int]:
+def _sec_to_min_sec(total_seconds):
     """秒→(分,秒) / None,0,NaNは(0,0)"""
     if total_seconds is None:
         return 0, 0
@@ -179,7 +175,7 @@ def _sec_to_min_sec(total_seconds: float | int | None) -> tuple[int, int]:
         return 0, 0
 
 
-def _mmss_str(total_seconds: float | int | None) -> str:
+def _mmss_str(total_seconds):
     """秒→ 'm:ss'（無効なら '—'）"""
     m, s = _sec_to_min_sec(total_seconds)
     if m == 0 and s == 0:
@@ -187,7 +183,7 @@ def _mmss_str(total_seconds: float | int | None) -> str:
     return f"{m}:{s:02d}"
 
 
-def _prev_time_caption(st_container, sec_value: float | int | None):
+def _prev_time_caption(st_container, sec_value):
     """前回値：m:ss（xxx sec）"""
     if _is_blank_like(sec_value):
         return
@@ -201,11 +197,37 @@ def _prev_time_caption(st_container, sec_value: float | int | None):
         return
 
 
+def _filter_portfolio_by_date(dfp, selected_date: date):
+    """
+    portfolio全件dfから、selected_date の行だけ抽出。
+    date列が 'YYYY-MM-DD' 以外でも、parseできるものは date として比較する。
+    """
+    if dfp is None or dfp.empty:
+        return dfp
+
+    if "date" not in dfp.columns:
+        return dfp.iloc[0:0].copy()
+
+    try:
+        dcol = dfp["date"]
+        dt = None
+        # まずdatetime変換（失敗はNaT）
+        dt = __import__("pandas").to_datetime(dcol, errors="coerce")
+        mask = dt.dt.date == selected_date
+        out = dfp.loc[mask].copy()
+        return out
+    except Exception:
+        # フォールバック：文字列一致
+        iso = str(selected_date)
+        mask = dfp["date"].astype(str).str.strip() == iso
+        return dfp.loc[mask].copy()
+
+
 # ======================
-# portfolio UI（固定入力）
+# portfolio UI（固定入力 / 日付連動）
 #  - checkbox廃止
 #  - 0は保存しない（空白扱い）
-#  - 前回値表示
+#  - 前回値表示は「同日内の最新値」
 #  - 1500/3000は「分＋秒」入力 → 保存時に秒へ変換
 # ======================
 def render_portfolio_fixed(st, storage):
@@ -223,12 +245,20 @@ def render_portfolio_fixed(st, storage):
         st.error(msg)
         return
 
-    # 既存データ（最新値の初期値に使う）
-    dfp = storage.load_all_portfolio()
+    # 全件を読む（この後、selected_date で絞る）
+    dfp_all = storage.load_all_portfolio()
 
-    # date は UI の日付を使う
+    # ① 基本（まず日付を選ばせる）
     st.markdown("### ① 基本")
     selected_date = st.date_input("日付", value=date.today(), key="pf_date")
+
+    # 選択日のみ抽出
+    dfp = _filter_portfolio_by_date(dfp_all, selected_date)
+
+    if dfp is None or dfp.empty:
+        st.info("この日付の記録はまだありません（入力欄は空＝0扱い）")
+    else:
+        st.success("この日付の記録を読み込みました（同日の最新値を入力欄に反映）")
 
     # ----------------------
     # ② 体（身長/体重）
@@ -236,30 +266,29 @@ def render_portfolio_fixed(st, storage):
     st.markdown("### ② 体（body）")
     c1, c2 = st.columns(2)
 
-    default_height = _latest_non_empty(dfp, "height_cm")
-    default_weight = _latest_non_empty(dfp, "weight_kg")
+    day_height = _latest_non_empty(dfp, "height_cm")
+    day_weight = _latest_non_empty(dfp, "weight_kg")
 
     height_cm = c1.number_input(
         "身長 (cm)",
         min_value=0.0,
         max_value=250.0,
-        value=_num_default(default_height, 0.0),
+        value=_num_default(day_height, 0.0),
         step=0.1,
         key="pf_height_cm",
     )
-    _prev_caption(c1, default_height)
+    _prev_caption(c1, day_height)
 
     weight_kg = c2.number_input(
         "体重 (kg)",
         min_value=0.0,
         max_value=200.0,
-        value=_num_default(default_weight, 0.0),
+        value=_num_default(day_weight, 0.0),
         step=0.1,
         key="pf_weight_kg",
     )
-    _prev_caption(c2, default_weight)
+    _prev_caption(c2, day_weight)
 
-    # BMI 表示（保存は Sheets 側計算でもOK）
     bmi_preview = None
     if height_cm > 0 and weight_kg > 0:
         bmi_preview = weight_kg / ((height_cm / 100.0) ** 2)
@@ -271,27 +300,25 @@ def render_portfolio_fixed(st, storage):
     # ③ 陸上（タイム）
     # ----------------------
     st.markdown("### ③ 陸上（track）")
-    default_100 = _latest_non_empty(dfp, "run_100m_sec")
-    default_1500 = _latest_non_empty(dfp, "run_1500m_sec")
-    default_3000 = _latest_non_empty(dfp, "run_3000m_sec")
-    default_meet = _latest_non_empty(dfp, "track_meet")
+    day_50 = _latest_non_empty(dfp, "run_100m_sec")  # 列名は互換維持（UIは50m）
+    day_1500 = _latest_non_empty(dfp, "run_1500m_sec")
+    day_3000 = _latest_non_empty(dfp, "run_3000m_sec")
+    day_meet = _latest_non_empty(dfp, "track_meet")
 
     cc1, cc2, cc3 = st.columns(3)
 
-    # 100m は秒（小数）でOK
-    run_100 = cc1.number_input(
+    run_50 = cc1.number_input(
         "50m (sec)",
         min_value=0.0,
         max_value=9999.0,
-        value=_num_default(default_100, 0.0),
+        value=_num_default(day_50, 0.0),
         step=0.01,
-        key="pf_run_100",
+        key="pf_run_100",  # 既存key維持
     )
-    _prev_caption(cc1, default_100)
+    _prev_caption(cc1, day_50)
 
-    # 1500m / 3000m は分＋秒入力
-    d1500_m, d1500_s = _sec_to_min_sec(default_1500)
-    d3000_m, d3000_s = _sec_to_min_sec(default_3000)
+    d1500_m, d1500_s = _sec_to_min_sec(day_1500)
+    d3000_m, d3000_s = _sec_to_min_sec(day_3000)
 
     cc2.markdown("**1500m (min:sec)**")
     m1500, s1500 = cc2.columns([1, 1])
@@ -302,7 +329,6 @@ def render_portfolio_fixed(st, storage):
         value=int(d1500_m),
         step=1,
         key="pf_run_1500_min",
-        label_visibility="visible",
     )
     run_1500_sec = s1500.number_input(
         "秒",
@@ -311,9 +337,8 @@ def render_portfolio_fixed(st, storage):
         value=int(d1500_s),
         step=1,
         key="pf_run_1500_sec",
-        label_visibility="visible",
     )
-    _prev_time_caption(cc2, default_1500)
+    _prev_time_caption(cc2, day_1500)
 
     cc3.markdown("**3000m (min:sec)**")
     m3000, s3000 = cc3.columns([1, 1])
@@ -324,7 +349,6 @@ def render_portfolio_fixed(st, storage):
         value=int(d3000_m),
         step=1,
         key="pf_run_3000_min",
-        label_visibility="visible",
     )
     run_3000_sec = s3000.number_input(
         "秒 ",
@@ -333,21 +357,18 @@ def render_portfolio_fixed(st, storage):
         value=int(d3000_s),
         step=1,
         key="pf_run_3000_sec",
-        label_visibility="visible",
     )
-    _prev_time_caption(cc3, default_3000)
+    _prev_time_caption(cc3, day_3000)
 
-    # 保存用（秒に統一）
     run_1500_total = int(run_1500_min) * 60 + int(run_1500_sec)
     run_3000_total = int(run_3000_min) * 60 + int(run_3000_sec)
 
-    # 目視用の現在値表示（任意）
     cc2.caption(f"入力値：{run_1500_min}:{int(run_1500_sec):02d}（{run_1500_total} sec）" if run_1500_total > 0 else "入力値：—")
     cc3.caption(f"入力値：{run_3000_min}:{int(run_3000_sec):02d}（{run_3000_total} sec）" if run_3000_total > 0 else "入力値：—")
 
     track_meet = st.text_input(
         "陸上大会名（任意）",
-        value=_text_default(default_meet, ""),
+        value=_text_default(day_meet, ""),
         key="pf_track_meet",
     )
 
@@ -355,172 +376,90 @@ def render_portfolio_fixed(st, storage):
     # ④ 学業（テスト）
     # ----------------------
     st.markdown("### ④ 学業（school）")
-    default_rank = _latest_non_empty(dfp, "rank")
-    default_dev = _latest_non_empty(dfp, "deviation")
-    default_jp = _latest_non_empty(dfp, "score_jp")
-    default_math = _latest_non_empty(dfp, "score_math")
-    default_en = _latest_non_empty(dfp, "score_en")
-    default_sci = _latest_non_empty(dfp, "score_sci")
-    default_soc = _latest_non_empty(dfp, "score_soc")
-    default_rating = _latest_non_empty(dfp, "rating")
+    day_rank = _latest_non_empty(dfp, "rank")
+    day_dev = _latest_non_empty(dfp, "deviation")
+    day_jp = _latest_non_empty(dfp, "score_jp")
+    day_math = _latest_non_empty(dfp, "score_math")
+    day_en = _latest_non_empty(dfp, "score_en")
+    day_sci = _latest_non_empty(dfp, "score_sci")
+    day_soc = _latest_non_empty(dfp, "score_soc")
+    day_rating = _latest_non_empty(dfp, "rating")
 
     s1, s2, s3 = st.columns(3)
-    rank = s1.number_input(
-        "順位 (rank)",
-        min_value=0.0,
-        max_value=99999.0,
-        value=_num_default(default_rank, 0.0),
-        step=1.0,
-        key="pf_rank",
-    )
-    _prev_caption(s1, default_rank)
+    rank = s1.number_input("順位 (rank)", min_value=0.0, max_value=99999.0, value=_num_default(day_rank, 0.0), step=1.0, key="pf_rank")
+    _prev_caption(s1, day_rank)
 
-    deviation = s2.number_input(
-        "偏差値 (deviation)",
-        min_value=0.0,
-        max_value=100.0,
-        value=_num_default(default_dev, 0.0),
-        step=0.1,
-        key="pf_deviation",
-    )
-    _prev_caption(s2, default_dev)
+    deviation = s2.number_input("偏差値 (deviation)", min_value=0.0, max_value=100.0, value=_num_default(day_dev, 0.0), step=0.1, key="pf_deviation")
+    _prev_caption(s2, day_dev)
 
-    rating = s3.number_input(
-        "評点 (rating)",
-        min_value=0.0,
-        max_value=999.0,
-        value=_num_default(default_rating, 0.0),
-        step=0.1,
-        key="pf_rating",
-    )
-    _prev_caption(s3, default_rating)
+    rating = s3.number_input("評点 (rating)", min_value=0.0, max_value=999.0, value=_num_default(day_rating, 0.0), step=0.1, key="pf_rating")
+    _prev_caption(s3, day_rating)
 
     t1, t2, t3, t4, t5 = st.columns(5)
-    score_jp = t1.number_input(
-        "国語",
-        min_value=0.0,
-        max_value=200.0,
-        value=_num_default(default_jp, 0.0),
-        step=1.0,
-        key="pf_score_jp",
-    )
-    _prev_caption(t1, default_jp)
+    score_jp = t1.number_input("国語", min_value=0.0, max_value=200.0, value=_num_default(day_jp, 0.0), step=1.0, key="pf_score_jp")
+    _prev_caption(t1, day_jp)
 
-    score_math = t2.number_input(
-        "数学",
-        min_value=0.0,
-        max_value=200.0,
-        value=_num_default(default_math, 0.0),
-        step=1.0,
-        key="pf_score_math",
-    )
-    _prev_caption(t2, default_math)
+    score_math = t2.number_input("数学", min_value=0.0, max_value=200.0, value=_num_default(day_math, 0.0), step=1.0, key="pf_score_math")
+    _prev_caption(t2, day_math)
 
-    score_en = t3.number_input(
-        "英語",
-        min_value=0.0,
-        max_value=200.0,
-        value=_num_default(default_en, 0.0),
-        step=1.0,
-        key="pf_score_en",
-    )
-    _prev_caption(t3, default_en)
+    score_en = t3.number_input("英語", min_value=0.0, max_value=200.0, value=_num_default(day_en, 0.0), step=1.0, key="pf_score_en")
+    _prev_caption(t3, day_en)
 
-    score_sci = t4.number_input(
-        "理科",
-        min_value=0.0,
-        max_value=200.0,
-        value=_num_default(default_sci, 0.0),
-        step=1.0,
-        key="pf_score_sci",
-    )
-    _prev_caption(t4, default_sci)
+    score_sci = t4.number_input("理科", min_value=0.0, max_value=200.0, value=_num_default(day_sci, 0.0), step=1.0, key="pf_score_sci")
+    _prev_caption(t4, day_sci)
 
-    score_soc = t5.number_input(
-        "社会",
-        min_value=0.0,
-        max_value=200.0,
-        value=_num_default(default_soc, 0.0),
-        step=1.0,
-        key="pf_score_soc",
-    )
-    _prev_caption(t5, default_soc)
+    score_soc = t5.number_input("社会", min_value=0.0, max_value=200.0, value=_num_default(day_soc, 0.0), step=1.0, key="pf_score_soc")
+    _prev_caption(t5, day_soc)
 
     # ----------------------
     # ⑤ サッカー（実績）
     # ----------------------
     st.markdown("### ⑤ サッカー（soccer）")
-    default_tcenter = _latest_bool(dfp, "tcenter")
-    default_soc_tour = _latest_non_empty(dfp, "soccer_tournament")
-    default_match = _latest_non_empty(dfp, "match_result")
-    default_url = _latest_non_empty(dfp, "video_url")
-    default_vnote = _latest_non_empty(dfp, "video_note")
+    day_tcenter = _latest_bool(dfp, "tcenter")
+    day_soc_tour = _latest_non_empty(dfp, "soccer_tournament")
+    day_match = _latest_non_empty(dfp, "match_result")
+    day_url = _latest_non_empty(dfp, "video_url")
+    day_vnote = _latest_non_empty(dfp, "video_note")
 
-    tcenter = st.checkbox("トレセン（tcenter）", value=default_tcenter, key="pf_tcenter")
+    tcenter = st.checkbox("トレセン（tcenter）", value=bool(day_tcenter), key="pf_tcenter")
 
-    soccer_tournament = st.text_input(
-        "サッカー大会名（任意）",
-        value=_text_default(default_soc_tour, ""),
-        key="pf_soccer_tournament",
-    )
-
-    match_result = st.text_input(
-        "試合実績（match_result）",
-        value=_text_default(default_match, ""),
-        key="pf_match_result",
-    )
+    soccer_tournament = st.text_input("サッカー大会名（任意）", value=_text_default(day_soc_tour, ""), key="pf_soccer_tournament")
+    match_result = st.text_input("試合実績（match_result）", value=_text_default(day_match, ""), key="pf_match_result")
 
     v1, v2 = st.columns(2)
-    video_url = v1.text_input(
-        "動画URL（video_url）",
-        value=_text_default(default_url, ""),
-        key="pf_video_url",
-    )
-    video_note = v2.text_input(
-        "動画備考（video_note）",
-        value=_text_default(default_vnote, ""),
-        key="pf_video_note",
-    )
+    video_url = v1.text_input("動画URL（video_url）", value=_text_default(day_url, ""), key="pf_video_url")
+    video_note = v2.text_input("動画備考（video_note）", value=_text_default(day_vnote, ""), key="pf_video_note")
 
     # ----------------------
     # ⑥ 自由記述
     # ----------------------
     st.markdown("### ⑥ 自由記述（note）")
-    default_note = _latest_non_empty(dfp, "note")
-    note = st.text_area(
-        "メモ（note）",
-        value=_text_default(default_note, ""),
-        height=120,
-        key="pf_note",
-    )
+    day_note = _latest_non_empty(dfp, "note")
+    note = st.text_area("メモ（note）", value=_text_default(day_note, ""), height=120, key="pf_note")
 
     st.divider()
 
     # ======================
     # 保存（行追加）
-    # ルール：
-    # - 数値は「0なら保存しない（空白扱い）」
-    # - 文字列は空なら保存しない
-    # - tcenter は履歴として残すため常に保存（False/True）
-    # - bmi は基本保存しない（Sheets数式運用）
+    #  - 数値は0なら保存しない（空白扱い）
+    #  - 文字列は空なら保存しない
+    #  - tcenterは履歴として残すため常に保存（False/True）
+    #  - bmiは基本保存しない（Sheets数式運用）
     # ======================
     if st.button("保存（行追加）", type="primary", use_container_width=True):
         row = {"date": str(selected_date)}
 
-        # 数値：0は保存しない
         if height_cm != 0:
             row["height_cm"] = float(height_cm)
         if weight_kg != 0:
             row["weight_kg"] = float(weight_kg)
 
         # bmi：保存しない（Sheets側の式でOK）
-        # if bmi_preview is not None:
-        #     row["bmi"] = float(bmi_preview)
 
-        if run_100 != 0:
-            row["run_100m_sec"] = float(run_100)
+        # 50m（列名は互換維持：run_100m_sec）
+        if run_50 != 0:
+            row["run_100m_sec"] = float(run_50)
 
-        # 1500/3000：分秒 → 秒
         if run_1500_total != 0:
             row["run_1500m_sec"] = float(run_1500_total)
         if run_3000_total != 0:
@@ -547,7 +486,7 @@ def render_portfolio_fixed(st, storage):
         if score_soc != 0:
             row["score_soc"] = float(score_soc)
 
-        # tcenter は常に保存（False/True）
+        # tcenterは常に保存
         row["tcenter"] = bool(tcenter)
 
         if str(soccer_tournament).strip():
@@ -561,14 +500,13 @@ def render_portfolio_fixed(st, storage):
         if str(note).strip():
             row["note"] = str(note).strip()
 
-        # 事故防止：date 以外に何も無い場合は保存しない
         meaningful = [k for k in row.keys() if k not in ["date"]]
         if len(meaningful) == 0:
             st.warning("保存する値がありません（全て空欄）")
         else:
             storage.append_portfolio_row(row)
             st.success("保存しました（行追加）")
-            st.caption("※集計側は『最新行』ではなく、列ごとに最新『値』を採用してください")
+            st.caption("※この日付の最新値は『日付フィルタ後の最新値』として扱われます")
 
 
 # ======================
@@ -576,7 +514,6 @@ def render_portfolio_fixed(st, storage):
 # ======================
 storage = build_storage(st)  # secrets があれば Sheets、なければ CSV
 train_df = load_training_list()
-
 
 # ======================
 # UI
@@ -598,7 +535,6 @@ with st.sidebar:
             st.caption(f"spreadsheet_id:\n{info['spreadsheet_id']}")
         if "worksheet" in info:
             st.caption(f"worksheet: {info['worksheet']}")
-        # portfolio は表示だけ（無い場合もある）
         if "portfolio_worksheet" in info:
             st.caption(f"portfolio_worksheet: {info['portfolio_worksheet']}")
 
@@ -639,7 +575,6 @@ st.divider()
 # OFF or DAYトレ
 # ======================
 if day_key == "OFF":
-    # ★月曜OFFのおまけ（ボックスブリージング）
     render_box_breath_ui(st, key_prefix=f"box_{selected_date}_OFF")
     st.divider()
     st.info("今日はOFF（回復日）です。**ストレッチ10〜15分だけは必ず**やりましょう。")
