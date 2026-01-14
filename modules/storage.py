@@ -1,9 +1,11 @@
+# modules/storage.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 import pandas as pd
 import os
+import re
 
 
 # =========================
@@ -15,7 +17,7 @@ RECORD_COLUMNS = ["date", "weekday", "day", "item", "part", "done", "weight"]
 # =========================
 # 追加：ポートフォリオ（portfolio シート）
 # ※「列決め打ち」固定スキーマ
-# =========================
+# ======================
 PORTFOLIO_COLUMNS = [
     "date",
     "height_cm",
@@ -41,6 +43,23 @@ PORTFOLIO_COLUMNS = [
     "note",
 ]
 
+# ======================
+# 追加：未来予想図（ROADMAP シート）
+# ======================
+ROADMAP_COLUMNS = [
+    "start_ym",
+    "end_ym",
+    "metric",
+    "low",
+    "mid",
+    "high",
+    "note",
+    "topic_text",
+    "achieved",
+]
+
+ROADMAP_NUMERIC_COLS = ["low", "mid", "high"]
+
 # 数値として扱いたい列（portfolio）
 PORTFOLIO_NUMERIC_COLS = [
     "height_cm",
@@ -56,32 +75,21 @@ PORTFOLIO_NUMERIC_COLS = [
     "score_en",
     "score_sci",
     "score_soc",
-    "rating",
 ]
 
 
-# =========================
-# helper：portfolio を date で安定ソート
-# - date昇順（古→新）
-# - 同一dateは元の順序を維持（mergesort）
-# - date不正/空は最後
-# =========================
 def _sort_portfolio_by_date(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
+    """
+    date 昇順（古→新）に安定ソート。
+    date の parse に失敗した行は末尾。
+    """
+    if df is None or df.empty or "date" not in df.columns:
         return df
-
-    if "date" not in df.columns:
-        # 念のため（date列が無いケース）
-        return df
-
-    # 文字列の空/None/"nan" を空扱い
-    s = df["date"].astype(str).replace("nan", "").replace("None", "").str.strip()
-
-    # YYYY-MM-DD を想定してパース（失敗はNaT）
-    dt = pd.to_datetime(s, errors="coerce", format="%Y-%m-%d")
 
     out = df.copy()
-    out["_date_parsed"] = dt
+
+    # pandas の to_datetime で parse（無効は NaT）
+    out["_date_parsed"] = pd.to_datetime(out["date"], errors="coerce")
 
     # mergesort は stable（同一キーの相対順序が保たれる）
     out = out.sort_values(
@@ -113,7 +121,6 @@ class BaseStorage:
 
     # ===== portfolio（列決め打ち）=====
     def supports_portfolio(self) -> bool:
-        """portfolio を使えるストレージか（基本は Sheets 時のみ True でOK）。"""
         return False
 
     def portfolio_healthcheck(self) -> Tuple[bool, str]:
@@ -126,89 +133,130 @@ class BaseStorage:
         # 既定：空DF
         return pd.DataFrame(columns=PORTFOLIO_COLUMNS)
 
+    # ===== roadmap（未来予想図）=====
+    def supports_roadmap(self) -> bool:
+        return False
+
+    def roadmap_healthcheck(self) -> Tuple[bool, str]:
+        return False, "ROADMAP 未対応"
+
+    def load_all_roadmap(self) -> pd.DataFrame:
+        return pd.DataFrame(columns=ROADMAP_COLUMNS)
+
 
 @dataclass
 class CSVStorage(BaseStorage):
-    path: str = "data.csv"
-    portfolio_path: str = "portfolio.csv"
-
-    def _ensure(self):
-        if not os.path.exists(self.path):
-            pd.DataFrame(columns=RECORD_COLUMNS).to_csv(self.path, index=False, encoding="utf-8-sig")
-
-    def _ensure_portfolio(self):
-        if not os.path.exists(self.portfolio_path):
-            pd.DataFrame(columns=PORTFOLIO_COLUMNS).to_csv(self.portfolio_path, index=False, encoding="utf-8-sig")
+    path: str
+    portfolio_path: str
+    roadmap_path: str = "roadmap.csv"
 
     # ===== log =====
     def healthcheck(self) -> Tuple[bool, str]:
-        try:
-            self._ensure()
-            return True, "ローカルCSV（fallback）"
-        except Exception as e:
-            return False, f"CSVエラー: {e}"
+        if not os.path.exists(self.path):
+            return False, f"CSVが見つかりません: {self.path}"
+        return True, f"CSV OK: {self.path}"
 
     def append_records(self, rows: List[Dict[str, Any]]) -> None:
-        self._ensure()
-        df = pd.read_csv(self.path, encoding="utf-8-sig")
-        add = pd.DataFrame(rows)
-        out = pd.concat([df, add], ignore_index=True)
-        out.to_csv(self.path, index=False, encoding="utf-8-sig")
+        if not rows:
+            return
+        df_new = pd.DataFrame(rows)
+        if os.path.exists(self.path):
+            df_old = pd.read_csv(self.path)
+            df = pd.concat([df_old, df_new], ignore_index=True)
+        else:
+            df = df_new
+        df.to_csv(self.path, index=False)
 
     def load_all_records(self) -> pd.DataFrame:
-        self._ensure()
+        if not os.path.exists(self.path):
+            return pd.DataFrame(columns=RECORD_COLUMNS)
         try:
-            return pd.read_csv(self.path, encoding="utf-8-sig")
+            df = pd.read_csv(self.path)
         except Exception:
-            return pd.read_csv(self.path, encoding="utf-8")
+            return pd.DataFrame(columns=RECORD_COLUMNS)
+        # 欠けてる列があっても落ちないように補完
+        for c in RECORD_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        return df[RECORD_COLUMNS]
 
     # ===== portfolio =====
     def supports_portfolio(self) -> bool:
-        # いまは安全のため、CSV fallback では portfolio を無効にする方針を維持
-        return False
+        return os.path.exists(self.portfolio_path)
 
     def portfolio_healthcheck(self) -> Tuple[bool, str]:
-        return False, "Sheets接続ではないため portfolio は無効（CSV fallback）"
+        if not self.supports_portfolio():
+            return False, f"portfolio CSVが見つかりません: {self.portfolio_path}"
+        return True, f"portfolio CSV OK: {self.portfolio_path}"
 
     def append_portfolio_row(self, row: Dict[str, Any]) -> None:
-        # CSV では無効（誤運用防止）
-        return
+        df_new = pd.DataFrame([row])
+        if os.path.exists(self.portfolio_path):
+            df_old = pd.read_csv(self.portfolio_path)
+            df = pd.concat([df_old, df_new], ignore_index=True)
+        else:
+            df = df_new
+        df.to_csv(self.portfolio_path, index=False)
 
     def load_all_portfolio(self) -> pd.DataFrame:
-        """
-        CSVでも読みだけは可能だが、現方針では UI からは無効。
-        念のため date ソート仕様は揃えておく。
-        """
-        self._ensure_portfolio()
+        if not self.supports_portfolio():
+            return pd.DataFrame(columns=PORTFOLIO_COLUMNS)
         try:
-            df = pd.read_csv(self.portfolio_path, encoding="utf-8-sig")
+            df = pd.read_csv(self.portfolio_path)
         except Exception:
-            df = pd.read_csv(self.portfolio_path, encoding="utf-8")
+            return pd.DataFrame(columns=PORTFOLIO_COLUMNS)
 
-        # 欠けてる列があっても落ちないように補完
+        # 列が揃ってなければ揃える（足りない列は空で追加）
         for c in PORTFOLIO_COLUMNS:
             if c not in df.columns:
                 df[c] = ""
+        df = df[PORTFOLIO_COLUMNS]
+
+        # boolean
+        if "tcenter" in df.columns:
+            df["tcenter"] = (
+                df["tcenter"].astype(str).str.lower().isin(["true", "1", "yes", "y", "on"])
+            )
 
         # numeric
         for c in PORTFOLIO_NUMERIC_COLS:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
 
-        # boolean
-        if "tcenter" in df.columns:
-            df["tcenter"] = df["tcenter"].astype(str).str.lower().isin(["true", "1", "yes", "y", "on"])
+        return df
 
-        df = df[PORTFOLIO_COLUMNS]
-        return _sort_portfolio_by_date(df)
+    def supports_roadmap(self) -> bool:
+        return os.path.exists(self.roadmap_path)
+
+    def roadmap_healthcheck(self) -> Tuple[bool, str]:
+        if not self.supports_roadmap():
+            return False, f"ROADMAP CSVが見つかりません: {self.roadmap_path}"
+        return True, f"ROADMAP CSV OK: {self.roadmap_path}"
+
+    def load_all_roadmap(self) -> pd.DataFrame:
+        if not self.supports_roadmap():
+            return pd.DataFrame(columns=ROADMAP_COLUMNS)
+        try:
+            df = pd.read_csv(self.roadmap_path)
+        except Exception:
+            return pd.DataFrame(columns=ROADMAP_COLUMNS)
+
+        for c in ROADMAP_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[ROADMAP_COLUMNS]
+
+        for c in ROADMAP_NUMERIC_COLS:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        return df
 
 
-@dataclass
 class SheetsStorage(BaseStorage):
     st: Any
     spreadsheet_id: str
     worksheet_name: str
     portfolio_worksheet_name: str = "portfolio"
+    roadmap_worksheet_name: str = "ROADMAP"
 
     def _client(self):
         # 遅延 import（ローカル環境に gspread が無いケースの保険）
@@ -233,6 +281,24 @@ class SheetsStorage(BaseStorage):
         sh = gc.open_by_key(self.spreadsheet_id)
         return sh.worksheet(self.portfolio_worksheet_name)
 
+    def _ws_roadmap(self):
+        gc = self._client()
+        sh = gc.open_by_key(self.spreadsheet_id)
+        try:
+            return sh.worksheet(self.roadmap_worksheet_name)
+        except Exception:
+            return sh.add_worksheet(title=self.roadmap_worksheet_name, rows=2000, cols=30)
+
+    def _ensure_roadmap_header(self, ws) -> None:
+        values = ws.get_all_values()
+        if not values:
+            ws.append_row(ROADMAP_COLUMNS, value_input_option="USER_ENTERED")
+            return
+        header = values[0]
+        if header == ROADMAP_COLUMNS:
+            return
+        return
+
     def get_info(self) -> Dict[str, str]:
         return {
             "spreadsheet_id": self.spreadsheet_id,
@@ -244,6 +310,7 @@ class SheetsStorage(BaseStorage):
     def healthcheck(self) -> Tuple[bool, str]:
         try:
             ws = self._ws()
+            # A1が読めればOK
             _ = ws.acell("A1").value
             return True, "Google Sheets 接続 OK"
         except Exception as e:
@@ -260,19 +327,11 @@ class SheetsStorage(BaseStorage):
         ws = self._ws()
         self._ensure_header(ws)
 
+        # 既定の列順に合わせる
         values = []
         for r in rows:
-            values.append(
-                [
-                    r.get("date", ""),
-                    r.get("weekday", ""),
-                    r.get("day", ""),
-                    r.get("item", ""),
-                    r.get("part", ""),
-                    bool(r.get("done", False)),
-                    r.get("weight", ""),
-                ]
-            )
+            values.append([r.get(c, "") for c in RECORD_COLUMNS])
+
         ws.append_rows(values, value_input_option="USER_ENTERED")
 
     def load_all_records(self) -> pd.DataFrame:
@@ -285,17 +344,20 @@ class SheetsStorage(BaseStorage):
         data = values[1:]
         df = pd.DataFrame(data, columns=header)
 
-        # 型寄せ
-        if "done" in df.columns:
-            df["done"] = df["done"].astype(str).str.lower().isin(["true", "1", "yes", "y"])
-        if "weight" in df.columns:
-            df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
+        # 欠けてる列があっても落ちないように補完
+        for c in RECORD_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
 
-        return df
+        return df[RECORD_COLUMNS]
 
     # ===== portfolio =====
     def supports_portfolio(self) -> bool:
-        return True
+        try:
+            ws = self._ws_portfolio()
+            return ws is not None
+        except Exception:
+            return False
 
     def portfolio_healthcheck(self) -> Tuple[bool, str]:
         try:
@@ -303,55 +365,41 @@ class SheetsStorage(BaseStorage):
             _ = ws.acell("A1").value
             return True, "portfolio シートに接続OK"
         except Exception as e:
-            return False, f"portfolio 接続NG: {e}"
+            return False, f"portfolio 接続エラー: {e}"
 
-    def _ensure_portfolio_header(self, ws):
-        """
-        A1 が空ならヘッダを書き込み。
-        既にヘッダがある場合は「一致してるか」を軽くチェックして、
-        おかしければ警告（自動修復はしない：事故防止）。
-        """
-        a1 = ws.acell("A1").value
-        if not a1:
+    def _ensure_portfolio_header(self, ws) -> None:
+        values = ws.get_all_values()
+        if not values:
             ws.append_row(PORTFOLIO_COLUMNS, value_input_option="USER_ENTERED")
             return
+        header = values[0]
+        if header == PORTFOLIO_COLUMNS:
+            return
+        # 既存がある場合は「壊さない」ため、勝手に上書きはしない
+        return
 
-        # 既存ヘッダの整合チェック（安全のため警告のみ）
+    def _safe_float(self, v: Any):
         try:
-            header = ws.row_values(1)
-            # row_values は末尾の空セルを省略することがあるので、先頭一致で見る
-            if header[: len(PORTFOLIO_COLUMNS)] != PORTFOLIO_COLUMNS:
-                self.st.warning(
-                    "portfolio シートのヘッダが想定と一致しません。"
-                    "（列ズレの可能性）シート1行目を PORTFOLIO_COLUMNS に合わせてください。"
-                )
+            if v is None:
+                return None
+            s = str(v).strip()
+            if s == "":
+                return None
+            return float(s)
         except Exception:
-            pass
-
-    def _safe_cell_value(self, v: Any):
-        """gspread に渡す値の安全化（None/NaNなどを空に）"""
-        if v is None:
-            return ""
-        try:
-            if pd.isna(v):
-                return ""
-        except Exception:
-            pass
-        return v
+            return None
 
     def append_portfolio_row(self, row: Dict[str, Any]) -> None:
         """
         1行追加。
-        空欄は空のまま（B-1）。
-        bmi は Sheets 側の数式運用でもOKなので、基本は空で書く（rowに入ってれば書く）。
+        空欄は空のまま。
         """
         ws = self._ws_portfolio()
         self._ensure_portfolio_header(ws)
 
         values = []
         for c in PORTFOLIO_COLUMNS:
-            v = self._safe_cell_value(row.get(c, ""))
-            values.append(v)
+            values.append(row.get(c, ""))
 
         ws.append_row(values, value_input_option="USER_ENTERED")
 
@@ -384,10 +432,68 @@ class SheetsStorage(BaseStorage):
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
 
-        df = df[PORTFOLIO_COLUMNS]
-
-        # ★dateで安定ソート
         return _sort_portfolio_by_date(df)
+
+    # ===== roadmap =====
+    def supports_roadmap(self) -> bool:
+        try:
+            ws = self._ws_roadmap()
+            return ws is not None
+        except Exception:
+            return False
+
+    def roadmap_healthcheck(self) -> Tuple[bool, str]:
+        try:
+            ws = self._ws_roadmap()
+            self._ensure_roadmap_header(ws)
+            values = ws.get_all_values()
+            if not values:
+                return True, "ROADMAP シートを作成しました（空）"
+            header = values[0] if values else []
+            if header != ROADMAP_COLUMNS:
+                return False, f"ROADMAP ヘッダ不一致: {header} / expected: {ROADMAP_COLUMNS}"
+            return True, "ROADMAP シートに接続OK"
+        except Exception as e:
+            return False, f"ROADMAP 接続エラー: {e}"
+
+    def load_all_roadmap(self) -> pd.DataFrame:
+        if not self.supports_roadmap():
+            return pd.DataFrame(columns=ROADMAP_COLUMNS)
+
+        ws = self._ws_roadmap()
+        self._ensure_roadmap_header(ws)
+        values = ws.get_all_values()
+        if len(values) <= 1:
+            return pd.DataFrame(columns=ROADMAP_COLUMNS)
+
+        header = values[0]
+        data = values[1:]
+        df = pd.DataFrame(data, columns=header)
+
+        for c in ROADMAP_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[ROADMAP_COLUMNS]
+
+        for c in ROADMAP_NUMERIC_COLS:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        def _norm_ym(v):
+            s = str(v).strip()
+            if not s:
+                return ""
+            s = s.replace("/", "-").replace(".", "-")
+            m2 = re.match(r"^(\d{4})-(\d{1,2})$", s)
+            if m2:
+                return f"{int(m2.group(1)):04d}-{int(m2.group(2)):02d}"
+            m3 = re.match(r"^(\d{4})-(\d{2}).*$", s)
+            if m3:
+                return f"{int(m3.group(1)):04d}-{int(m3.group(2)):02d}"
+            return s
+
+        df["start_ym"] = df["start_ym"].apply(_norm_ym)
+        df["end_ym"] = df["end_ym"].apply(_norm_ym)
+        return df
 
 
 def build_storage(st) -> BaseStorage:
@@ -400,6 +506,7 @@ def build_storage(st) -> BaseStorage:
             spreadsheet_id = str(st.secrets["spreadsheet_id"]).strip()
             worksheet = str(st.secrets.get("worksheet", "log")).strip()
             portfolio_ws = str(st.secrets.get("portfolio_worksheet", "portfolio")).strip()
+            roadmap_ws = str(st.secrets.get("roadmap_worksheet", "ROADMAP")).strip()
 
             if spreadsheet_id:
                 return SheetsStorage(
@@ -407,8 +514,9 @@ def build_storage(st) -> BaseStorage:
                     spreadsheet_id=spreadsheet_id,
                     worksheet_name=worksheet,
                     portfolio_worksheet_name=portfolio_ws or "portfolio",
+                    roadmap_worksheet_name=roadmap_ws or "ROADMAP",
                 )
     except Exception:
         pass
 
-    return CSVStorage(path="data.csv", portfolio_path="portfolio.csv")
+    return CSVStorage(path="data.csv", portfolio_path="portfolio.csv", roadmap_path="roadmap.csv")
