@@ -136,6 +136,23 @@ def _prev_caption(st_container, v):
     st_container.caption(f"前回値：{v}")
 
 
+def _prev_bool_caption(st_container, v):
+    """前回値：bool 表示（値が未定義なら出さない）"""
+    if v is None:
+        return
+    s = str(v).strip().lower()
+    if s == "" or s in ["nan", "none", "null"]:
+        return
+    if s in ["true", "1", "yes", "y", "on"]:
+        st_container.caption("前回値：ON")
+        return
+    if s in ["false", "0", "no", "n", "off"]:
+        st_container.caption("前回値：OFF")
+        return
+    # 想定外でも文字で出す
+    st_container.caption(f"前回値：{v}")
+
+
 def _num_default(v, fallback=0.0):
     """number_input用：未入力（空扱い）の場合は 0 を入れる"""
     if _is_blank_like(v):
@@ -210,8 +227,6 @@ def _filter_portfolio_by_date(dfp, selected_date: date):
 
     try:
         dcol = dfp["date"]
-        dt = None
-        # まずdatetime変換（失敗はNaT）
         dt = __import__("pandas").to_datetime(dcol, errors="coerce")
         mask = dt.dt.date == selected_date
         out = dfp.loc[mask].copy()
@@ -223,11 +238,70 @@ def _filter_portfolio_by_date(dfp, selected_date: date):
         return dfp.loc[mask].copy()
 
 
+def _compute_global_latest_values(dfp_all):
+    """
+    全期間の「最新の入力値（非空欄の最新）」を作る。
+    - dateで昇順ソートしてから走査（= 後から過去日を入力しても“最新”は日付基準）
+    - 値は「空/0/NaN」は無効扱い（tcenterは別扱いで最後の値を採用）
+    """
+    latest = {}
+    if dfp_all is None or dfp_all.empty:
+        return latest
+
+    df = dfp_all.copy()
+
+    # 日付でソート（parseできないものは最後に寄せる）
+    try:
+        import pandas as pd
+        dt = pd.to_datetime(df["date"], errors="coerce") if "date" in df.columns else None
+        if dt is not None:
+            df["_dt"] = dt
+            df = df.sort_values(by=["_dt"], ascending=True, na_position="last")
+    except Exception:
+        pass
+
+    # tcenter は最後に見つかった bool を採用（空でもFalseとして扱えるが、前回値表示は None で抑制）
+    if "tcenter" in df.columns:
+        # 末尾から1つ見つける（true/false系のみ）
+        vals = df["tcenter"].tolist()
+        found = None
+        for v in reversed(vals):
+            if v is None:
+                continue
+            s = str(v).strip().lower()
+            if s in ["true", "1", "yes", "y", "on", "false", "0", "no", "n", "off"]:
+                found = v
+                break
+        if found is not None:
+            latest["tcenter"] = found
+
+    # その他列：前から順に見て、非空が出たら更新（最後に残ったものが最新）
+    for col in df.columns:
+        if col in ["_dt"]:
+            continue
+        if col == "tcenter":
+            continue
+        try:
+            for v in df[col].tolist():
+                if _is_blank_like(v):
+                    continue
+                # 文字列の "0" も無効扱いに寄せる
+                if isinstance(v, str):
+                    vv = v.strip()
+                    if vv in ["0", "0.0"]:
+                        continue
+                latest[col] = v
+        except Exception:
+            continue
+
+    return latest
+
+
 # ======================
 # portfolio UI（固定入力 / 日付連動）
-#  - checkbox廃止
 #  - 0は保存しない（空白扱い）
-#  - 前回値表示は「同日内の最新値」
+#  - 入力欄は「選択日付の値」があれば反映、なければ空（=0）
+#  - 前回値は「全期間の最新の入力値（dateソート後の最新非空）」を常に表示
 #  - 1500/3000は「分＋秒」入力 → 保存時に秒へ変換
 # ======================
 def render_portfolio_fixed(st, storage):
@@ -247,6 +321,9 @@ def render_portfolio_fixed(st, storage):
 
     # 全件を読む（この後、selected_date で絞る）
     dfp_all = storage.load_all_portfolio()
+
+    # ★全期間の「前回値（最新）」を作る（dateソート基準）
+    global_latest = _compute_global_latest_values(dfp_all)
 
     # ① 基本（まず日付を選ばせる）
     st.markdown("### ① 基本")
@@ -277,7 +354,7 @@ def render_portfolio_fixed(st, storage):
         step=0.1,
         key="pf_height_cm",
     )
-    _prev_caption(c1, day_height)
+    _prev_caption(c1, global_latest.get("height_cm"))
 
     weight_kg = c2.number_input(
         "体重 (kg)",
@@ -287,7 +364,7 @@ def render_portfolio_fixed(st, storage):
         step=0.1,
         key="pf_weight_kg",
     )
-    _prev_caption(c2, day_weight)
+    _prev_caption(c2, global_latest.get("weight_kg"))
 
     bmi_preview = None
     if height_cm > 0 and weight_kg > 0:
@@ -315,7 +392,7 @@ def render_portfolio_fixed(st, storage):
         step=0.01,
         key="pf_run_100",  # 既存key維持
     )
-    _prev_caption(cc1, day_50)
+    _prev_caption(cc1, global_latest.get("run_100m_sec"))
 
     d1500_m, d1500_s = _sec_to_min_sec(day_1500)
     d3000_m, d3000_s = _sec_to_min_sec(day_3000)
@@ -338,7 +415,7 @@ def render_portfolio_fixed(st, storage):
         step=1,
         key="pf_run_1500_sec",
     )
-    _prev_time_caption(cc2, day_1500)
+    _prev_time_caption(cc2, global_latest.get("run_1500m_sec"))
 
     cc3.markdown("**3000m (min:sec)**")
     m3000, s3000 = cc3.columns([1, 1])
@@ -358,7 +435,7 @@ def render_portfolio_fixed(st, storage):
         step=1,
         key="pf_run_3000_sec",
     )
-    _prev_time_caption(cc3, day_3000)
+    _prev_time_caption(cc3, global_latest.get("run_3000m_sec"))
 
     run_1500_total = int(run_1500_min) * 60 + int(run_1500_sec)
     run_3000_total = int(run_3000_min) * 60 + int(run_3000_sec)
@@ -371,6 +448,9 @@ def render_portfolio_fixed(st, storage):
         value=_text_default(day_meet, ""),
         key="pf_track_meet",
     )
+    # テキストは前回値を入力欄に残さない方針なので、必要なら表示のみ（caption）に出す
+    if _text_default(global_latest.get("track_meet"), "") != "":
+        st.caption(f"前回値：{_text_default(global_latest.get('track_meet'), '')}")
 
     # ----------------------
     # ④ 学業（テスト）
@@ -387,29 +467,29 @@ def render_portfolio_fixed(st, storage):
 
     s1, s2, s3 = st.columns(3)
     rank = s1.number_input("順位 (rank)", min_value=0.0, max_value=99999.0, value=_num_default(day_rank, 0.0), step=1.0, key="pf_rank")
-    _prev_caption(s1, day_rank)
+    _prev_caption(s1, global_latest.get("rank"))
 
     deviation = s2.number_input("偏差値 (deviation)", min_value=0.0, max_value=100.0, value=_num_default(day_dev, 0.0), step=0.1, key="pf_deviation")
-    _prev_caption(s2, day_dev)
+    _prev_caption(s2, global_latest.get("deviation"))
 
     rating = s3.number_input("評点 (rating)", min_value=0.0, max_value=999.0, value=_num_default(day_rating, 0.0), step=0.1, key="pf_rating")
-    _prev_caption(s3, day_rating)
+    _prev_caption(s3, global_latest.get("rating"))
 
     t1, t2, t3, t4, t5 = st.columns(5)
     score_jp = t1.number_input("国語", min_value=0.0, max_value=200.0, value=_num_default(day_jp, 0.0), step=1.0, key="pf_score_jp")
-    _prev_caption(t1, day_jp)
+    _prev_caption(t1, global_latest.get("score_jp"))
 
     score_math = t2.number_input("数学", min_value=0.0, max_value=200.0, value=_num_default(day_math, 0.0), step=1.0, key="pf_score_math")
-    _prev_caption(t2, day_math)
+    _prev_caption(t2, global_latest.get("score_math"))
 
     score_en = t3.number_input("英語", min_value=0.0, max_value=200.0, value=_num_default(day_en, 0.0), step=1.0, key="pf_score_en")
-    _prev_caption(t3, day_en)
+    _prev_caption(t3, global_latest.get("score_en"))
 
     score_sci = t4.number_input("理科", min_value=0.0, max_value=200.0, value=_num_default(day_sci, 0.0), step=1.0, key="pf_score_sci")
-    _prev_caption(t4, day_sci)
+    _prev_caption(t4, global_latest.get("score_sci"))
 
     score_soc = t5.number_input("社会", min_value=0.0, max_value=200.0, value=_num_default(day_soc, 0.0), step=1.0, key="pf_score_soc")
-    _prev_caption(t5, day_soc)
+    _prev_caption(t5, global_latest.get("score_soc"))
 
     # ----------------------
     # ⑤ サッカー（実績）
@@ -421,14 +501,26 @@ def render_portfolio_fixed(st, storage):
     day_url = _latest_non_empty(dfp, "video_url")
     day_vnote = _latest_non_empty(dfp, "video_note")
 
+    # チェックボックスは「当該日が未記入なら False」を維持（=既存を壊さない）
     tcenter = st.checkbox("トレセン（tcenter）", value=bool(day_tcenter), key="pf_tcenter")
+    _prev_bool_caption(st, global_latest.get("tcenter"))
 
     soccer_tournament = st.text_input("サッカー大会名（任意）", value=_text_default(day_soc_tour, ""), key="pf_soccer_tournament")
+    if _text_default(global_latest.get("soccer_tournament"), "") != "":
+        st.caption(f"前回値：{_text_default(global_latest.get('soccer_tournament'), '')}")
+
     match_result = st.text_input("試合実績（match_result）", value=_text_default(day_match, ""), key="pf_match_result")
+    if _text_default(global_latest.get("match_result"), "") != "":
+        st.caption(f"前回値：{_text_default(global_latest.get('match_result'), '')}")
 
     v1, v2 = st.columns(2)
     video_url = v1.text_input("動画URL（video_url）", value=_text_default(day_url, ""), key="pf_video_url")
+    if _text_default(global_latest.get("video_url"), "") != "":
+        v1.caption(f"前回値：{_text_default(global_latest.get('video_url'), '')}")
+
     video_note = v2.text_input("動画備考（video_note）", value=_text_default(day_vnote, ""), key="pf_video_note")
+    if _text_default(global_latest.get("video_note"), "") != "":
+        v2.caption(f"前回値：{_text_default(global_latest.get('video_note'), '')}")
 
     # ----------------------
     # ⑥ 自由記述
@@ -436,6 +528,8 @@ def render_portfolio_fixed(st, storage):
     st.markdown("### ⑥ 自由記述（note）")
     day_note = _latest_non_empty(dfp, "note")
     note = st.text_area("メモ（note）", value=_text_default(day_note, ""), height=120, key="pf_note")
+    if _text_default(global_latest.get("note"), "") != "":
+        st.caption(f"前回値：{_text_default(global_latest.get('note'), '')}")
 
     st.divider()
 
@@ -506,7 +600,8 @@ def render_portfolio_fixed(st, storage):
         else:
             storage.append_portfolio_row(row)
             st.success("保存しました（行追加）")
-            st.caption("※この日付の最新値は『日付フィルタ後の最新値』として扱われます")
+            st.caption("※前回値は『全期間の最新の非空欄（dateソート基準）』として表示されます")
+            st.rerun()
 
 
 # ======================
