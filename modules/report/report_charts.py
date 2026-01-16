@@ -1,159 +1,127 @@
+# modules/report/report_charts.py
 from __future__ import annotations
 
-from typing import Optional
-
-# matplotlib は Streamlit Cloud で未導入のことがあるので optional import にする
+# matplotlib は Cloud 環境で未導入のことがあるため optional import
 try:
-    import matplotlib.pyplot as plt  # type: ignore
+    import matplotlib.pyplot as plt
     HAS_MPL = True
 except Exception:
-    plt = None  # type: ignore
+    plt = None
     HAS_MPL = False
 
 
 def _require_mpl():
-    if not HAS_MPL or plt is None:
+    if not HAS_MPL:
         raise ModuleNotFoundError(
-            "matplotlib is required for report charts, but it is not installed. "
-            "Please add 'matplotlib' to requirements.txt."
+            "matplotlib is required for report charts, but it is not installed."
         )
 
 
-def _empty_figure(title: str, message: str):
-    """
-    matplotlib が使える前提で、データ無し時の空図を返す
-    """
-    _require_mpl()
-    fig, ax = plt.subplots()
+# =========================================================
+# 共通ユーティリティ
+# =========================================================
+def _setup_ax(ax, title: str, ylabel_left: str | None = None, ylabel_right: str | None = None):
     ax.set_title(title)
-    ax.axis("off")
-    ax.text(0.5, 0.5, message, ha="center", va="center")
-    return fig
+    ax.grid(True, axis="y", alpha=0.3)
+    if ylabel_left:
+        ax.set_ylabel(ylabel_left)
+    if ylabel_right:
+        ax.right_ax.set_ylabel(ylabel_right)
 
 
-def build_body_chart(df):
-    """
-    身長/体重/BMI（左: 身長, 右: 体重 & BMI）
-    想定列: date, height_cm, weight_kg, bmi
-    """
+# =========================================================
+# P2: フィジカル（身長・体重・BMI）
+# =========================================================
+def fig_physical_height_weight_bmi(report, show_roadmap: bool = True):
     _require_mpl()
-    if df is None or getattr(df, "empty", True):
-        return _empty_figure("身長 / 体重 / BMI", "期間内のデータがありません")
 
-    fig, ax1 = plt.subplots()
-    ax1.set_title("身長 / 体重 / BMI")
-    ax1.set_xlabel("date")
-    ax1.set_ylabel("height (cm)")
+    df = report.portfolio
 
-    x = df["date"]
-    ax1.plot(x, df.get("height_cm"), label="height_cm")
-
+    fig, ax1 = plt.subplots(figsize=(8, 4))
     ax2 = ax1.twinx()
-    ax2.set_ylabel("weight (kg) / bmi")
-    if "weight_kg" in df.columns:
-        ax2.plot(x, df["weight_kg"], label="weight_kg")
+    ax1.right_ax = ax2  # util 用
+
+    ax1.plot(df["date"], df["height_cm"], label="Height (cm)", color="tab:blue")
+    ax2.plot(df["date"], df["weight_kg"], label="Weight (kg)", color="tab:orange")
     if "bmi" in df.columns:
-        ax2.plot(x, df["bmi"], label="bmi")
+        ax2.plot(df["date"], df["bmi"], label="BMI", color="tab:green", linestyle="--")
 
-    # 凡例（左右まとめ）
-    h1, l1 = ax1.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    ax1.legend(h1 + h2, l1 + l2, loc="upper left")
+    _setup_ax(ax1, "Physical Growth", "Height (cm)", "Weight / BMI")
 
-    fig.autofmt_xdate()
+    ax1.legend(loc="upper left")
+    ax2.legend(loc="upper right")
+
     return fig
 
 
-def build_run_chart(df, col: str, title: str, y_label: str):
-    """
-    汎用の走力グラフ（秒は内部sec）
-    """
+# =========================================================
+# P2: 走力（50m / 1500m / 3000m）
+# =========================================================
+def fig_run_metric(
+    report,
+    metric: str,
+    title: str,
+    show_roadmap: bool = True,
+    mmss: bool = False,
+):
     _require_mpl()
-    if df is None or getattr(df, "empty", True) or col not in df.columns:
-        return _empty_figure(title, "期間内のデータがありません")
 
-    fig, ax = plt.subplots()
+    df = report.portfolio
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(df["date"], df[metric], marker="o")
+
     ax.set_title(title)
-    ax.set_xlabel("date")
-    ax.set_ylabel(y_label)
-    ax.plot(df["date"], df[col], label=col)
-    ax.legend(loc="upper left")
-    fig.autofmt_xdate()
+    ax.set_ylabel("Time (sec)")
+    ax.grid(True, axis="y", alpha=0.3)
+
     return fig
 
 
-def build_school_overview_chart(df):
-    """
-    学業：順位＆偏差値（おすすめ分割の上段）
-    左: 偏差値, 右: 順位（反転表示）
-    想定列: date, deviation, rank
-    """
+# =========================================================
+# P3: 学業（順位・偏差値）
+# =========================================================
+def fig_academic_position(report, show_roadmap: bool = True):
     _require_mpl()
-    if df is None or getattr(df, "empty", True):
-        return _empty_figure("学業（順位 / 偏差値）", "期間内のデータがありません")
 
-    fig, ax1 = plt.subplots()
-    ax1.set_title("学業（順位 / 偏差値）")
-    ax1.set_xlabel("date")
+    df = report.portfolio
 
-    x = df["date"]
-
-    # deviation（左）
-    if "deviation" in df.columns:
-        ax1.set_ylabel("deviation")
-        ax1.plot(x, df["deviation"], label="deviation")
-
-    # rank（右・反転）
+    fig, ax1 = plt.subplots(figsize=(8, 4))
     ax2 = ax1.twinx()
-    if "rank" in df.columns:
-        ax2.set_ylabel("rank (smaller is better)")
-        ax2.plot(x, df["rank"], label="rank")
-        # 反転（上が良く見えるように）
-        try:
-            ax2.invert_yaxis()
-        except Exception:
-            pass
+    ax1.right_ax = ax2
 
-    h1, l1 = ax1.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    ax1.legend(h1 + h2, l1 + l2, loc="upper left")
+    ax1.plot(df["date"], df["rank"], label="Rank", color="tab:red")
+    ax2.plot(df["date"], df["deviation"], label="Deviation", color="tab:blue")
 
-    fig.autofmt_xdate()
+    _setup_ax(ax1, "Academic Position", "Rank", "Deviation")
+
+    ax1.legend(loc="upper left")
+    ax2.legend(loc="upper right")
+
     return fig
 
 
-def build_school_scores_chart(df):
-    """
-    学業：評点＆5教科（おすすめ分割の下段）
-    左: rating, 右: score_*（複数）
-    想定列: date, rating, score_jp, score_math, score_en, score_sci, score_soc
-    """
+# =========================================================
+# P3: 学業（評点・各教科スコア）
+# =========================================================
+def fig_academic_scores_rating(report, show_roadmap: bool = True):
     _require_mpl()
-    if df is None or getattr(df, "empty", True):
-        return _empty_figure("学業（評点 / 教科スコア）", "期間内のデータがありません")
 
-    fig, ax1 = plt.subplots()
-    ax1.set_title("学業（評点 / 教科スコア）")
-    ax1.set_xlabel("date")
+    df = report.portfolio
 
-    x = df["date"]
-
-    # rating（左）
-    if "rating" in df.columns:
-        ax1.set_ylabel("rating")
-        ax1.plot(x, df["rating"], label="rating")
-
-    # scores（右）
+    fig, ax1 = plt.subplots(figsize=(8, 4))
     ax2 = ax1.twinx()
-    ax2.set_ylabel("scores")
+    ax1.right_ax = ax2
 
-    score_cols = [c for c in ["score_jp", "score_math", "score_en", "score_sci", "score_soc"] if c in df.columns]
-    for c in score_cols:
-        ax2.plot(x, df[c], label=c)
+    ax1.plot(df["date"], df["rating"], label="Rating", color="black", linewidth=2)
 
-    h1, l1 = ax1.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    ax1.legend(h1 + h2, l1 + l2, loc="upper left")
+    for col in ["score_jp", "score_math", "score_en", "score_sci", "score_soc"]:
+        if col in df.columns:
+            ax2.plot(df["date"], df[col], label=col)
 
-    fig.autofmt_xdate()
+    _setup_ax(ax1, "Academic Scores", "Rating", "Scores")
+
+    ax1.legend(loc="upper left")
+    ax2.legend(loc="upper right", fontsize=8)
+
     return fig
