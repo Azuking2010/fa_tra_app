@@ -1,4 +1,8 @@
-# modules/report/__init__.py
-from .ui_report import render_report
+"""
+Report module package.
 
-__all__ = ["render_report"]
+NOTE:
+- Keep this file side-effect free.
+- Do NOT import ui_report here (to avoid import-time crashes on Streamlit Cloud
+  when optional dependencies like matplotlib are missing).
+"""
