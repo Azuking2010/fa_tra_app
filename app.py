@@ -18,6 +18,9 @@ from modules.box_breath_component import render_box_breath_ui
 # ★ROADMAPページ（未来予想図）
 from modules.roadmap.ui_roadmap import render_roadmap
 
+# ★REPORTページ（グラフ＆PDF/JSON出力）
+from modules.report.ui_report import render_report
+
 
 # ======================
 # ページ設定
@@ -643,7 +646,7 @@ with st.sidebar:
     st.caption("ページ")
     page = st.radio(
         "ページ",
-        ["トレーニング", "ポートフォリオ", "ROADMAP"],
+        ["トレーニング", "ポートフォリオ", "ROADMAP", "レポート"],
         index=0,
         label_visibility="collapsed",
     )
@@ -653,6 +656,10 @@ with st.sidebar:
 # ======================
 if page == "ROADMAP":
     render_roadmap(st)
+    st.stop()
+
+if page == "レポート":
+    render_report(st, storage)
     st.stop()
 
 if page == "ポートフォリオ":
@@ -675,28 +682,4 @@ with st.expander("共通ルール（必読）", expanded=True):
         st.write(f"・{r}")
 
 # ======================
-# 毎日（共通）
-# ======================
-render_daily(st, storage, selected_date, weekday_key)
-
-st.divider()
-
-# ======================
-# OFF or DAYトレ
-# ======================
-if day_key == "OFF":
-    render_box_breath_ui(st, key_prefix=f"box_{selected_date}_OFF")
-    st.divider()
-    st.info("今日はOFF（回復日）です。**ストレッチ10〜15分だけは必ず**やりましょう。")
-else:
-    render_day_training(st, storage, selected_date, weekday_key, day_key, train_df)
-
-    st.divider()
-    render_weight(st, storage, selected_date, weekday_key)
-
-# ======================
-# 親ビュー（集計）
-# ======================
-if parent_view:
-    st.divider()
-    render_parent_view(st, storage)
+# 毎
