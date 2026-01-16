@@ -652,7 +652,7 @@ with st.sidebar:
 # ページ切替
 # ======================
 if page == "ROADMAP":
-    render_roadmap(st, storage)
+    render_roadmap(st)
     st.stop()
 
 if page == "ポートフォリオ":
