@@ -15,6 +15,9 @@ from modules.ui_parent_view import render_parent_view
 # ★月曜OFFで表示する用
 from modules.box_breath_component import render_box_breath_ui
 
+# ★ROADMAPページ（未来予想図）
+from modules.roadmap.ui_roadmap import render_roadmap
+
 
 # ======================
 # ページ設定
@@ -260,8 +263,9 @@ def _compute_global_latest_values(dfp_all):
     except Exception:
         pass
 
-    # tcenter は最後に見つかった bool を採用
+    # tcenter は最後に見つかった bool を採用（無ければFalseとして扱えるが、前回値表示は None で抑制）
     if "tcenter" in df.columns:
+        # 末尾から1つ見つける（true/false系のみ）
         vals = df["tcenter"].tolist()
         found = None
         for v in reversed(vals):
@@ -284,7 +288,7 @@ def _compute_global_latest_values(dfp_all):
             for v in df[col].tolist():
                 if _is_blank_like(v):
                     continue
-                # 文字列の "0" も無効扱い
+                # 文字列の "0" も無効扱いに寄せる
                 if isinstance(v, str):
                     vv = v.strip()
                     if vv in ["0", "0.0"]:
@@ -294,166 +298,6 @@ def _compute_global_latest_values(dfp_all):
             continue
 
     return latest
-
-
-# ======================
-# ROADMAP helper（未来予想図）
-# ======================
-def _ym_from_date(d: date) -> str:
-    return f"{d.year:04d}-{d.month:02d}"
-
-
-def _norm_ym(v: str) -> str:
-    """
-    '2026-4' / '2026/04' なども '2026-04' に寄せる。
-    """
-    s = str(v).strip()
-    if not s:
-        return ""
-    s = s.replace("/", "-").replace(".", "-")
-    # 2026-4 -> 2026-04
-    try:
-        parts = s.split("-")
-        if len(parts) >= 2 and len(parts[0]) == 4:
-            y = int(parts[0])
-            m = int(parts[1])
-            return f"{y:04d}-{m:02d}"
-    except Exception:
-        pass
-    return s
-
-
-def _in_period(ym: str, start_ym: str, end_ym: str) -> bool:
-    """
-    ym が [start_ym, end_ym] に含まれるか
-    end_ym 空欄なら start_ym 以降すべて
-    """
-    if not start_ym:
-        return False
-    if ym < start_ym:
-        return False
-    if end_ym and ym > end_ym:
-        return False
-    return True
-
-
-def _render_roadmap_section(storage, selected_date: date):
-    """
-    ポートフォリオページ：選択日付の年月に該当する ROADMAP を表示
-    """
-    if not getattr(storage, "supports_roadmap", None):
-        return
-
-    if not storage.supports_roadmap():
-        # ここは静かに（未導入環境でも壊さない）
-        return
-
-    ok, msg = storage.roadmap_healthcheck()
-    if not ok:
-        st.warning(msg)
-        return
-
-    try:
-        dfr = storage.load_all_roadmap()
-    except Exception as e:
-        st.warning(f"ROADMAPの読み込みに失敗しました: {e}")
-        return
-
-    if dfr is None or dfr.empty:
-        return
-
-    ym = _ym_from_date(selected_date)
-
-    # 正規化
-    try:
-        dfr = dfr.copy()
-        if "start_ym" in dfr.columns:
-            dfr["start_ym"] = dfr["start_ym"].apply(_norm_ym)
-        if "end_ym" in dfr.columns:
-            dfr["end_ym"] = dfr["end_ym"].apply(_norm_ym)
-    except Exception:
-        pass
-
-    # 該当期間抽出
-    try:
-        mask = dfr.apply(
-            lambda r: _in_period(
-                ym,
-                str(r.get("start_ym", "")).strip(),
-                str(r.get("end_ym", "")).strip(),
-            ),
-            axis=1,
-        )
-        dfrp = dfr.loc[mask].copy()
-    except Exception:
-        dfrp = dfr.iloc[0:0].copy()
-
-    if dfrp.empty:
-        return
-
-    st.markdown("### ①-2 未来予想図（ROADMAP）")
-    st.caption("選択した年月に該当する目標レンジ（low / mid / high）を表示します。")
-
-    metric_label = {
-        "height_cm": "身長 (cm)",
-        "weight_kg": "体重 (kg)",
-        "run_100m_sec": "50m (sec) ※列名互換",
-        "run_1500m_sec": "1500m (sec)",
-        "run_3000m_sec": "3000m (sec)",
-        "score_5sum": "5教科総合点",
-        "rank": "学年順位",
-        "deviation_est": "偏差値（推定）",
-    }
-
-    # 表示順をできるだけ固定
-    order = [
-        "height_cm",
-        "weight_kg",
-        "run_100m_sec",
-        "run_1500m_sec",
-        "run_3000m_sec",
-        "score_5sum",
-        "rank",
-        "deviation_est",
-    ]
-    try:
-        dfrp["__ord"] = dfrp["metric"].apply(lambda x: order.index(x) if x in order else 999)
-        dfrp = dfrp.sort_values(["__ord", "metric"]).drop(columns=["__ord"])
-    except Exception:
-        pass
-
-    table_rows = []
-    for _, r in dfrp.iterrows():
-        metric = str(r.get("metric", "")).strip()
-        if not metric:
-            continue
-        table_rows.append(
-            {
-                "項目": metric_label.get(metric, metric),
-                "low": r.get("low", ""),
-                "mid": r.get("mid", ""),
-                "high": r.get("high", ""),
-                "補足": str(r.get("note", "")).strip(),
-            }
-        )
-
-    if table_rows:
-        st.dataframe(table_rows, use_container_width=True, hide_index=True)
-
-    # topic_text が入っているものは、別枠で表示（任意）
-    try:
-        topics = []
-        for _, r in dfrp.iterrows():
-            t = str(r.get("topic_text", "")).strip()
-            if not t:
-                continue
-            topics.append(t)
-        if topics:
-            st.markdown("#### 目標トピックス（任意）")
-            for t in topics[:10]:
-                st.write(f"・{t}")
-    except Exception:
-        pass
 
 
 # ======================
@@ -487,9 +331,6 @@ def render_portfolio_fixed(st, storage):
     # ① 基本（まず日付を選ばせる）
     st.markdown("### ① 基本")
     selected_date = st.date_input("日付", value=date.today(), key="pf_date")
-
-    # ★ここで ROADMAP を表示（追加）
-    _render_roadmap_section(storage, selected_date)
 
     # 選択日のみ抽出
     dfp = _filter_portfolio_by_date(dfp_all, selected_date)
@@ -610,6 +451,7 @@ def render_portfolio_fixed(st, storage):
         value=_text_default(day_meet, ""),
         key="pf_track_meet",
     )
+    # テキストは前回値を入力欄に残さない方針なので、必要なら表示のみ（caption）に出す
     if _text_default(global_latest.get("track_meet"), "") != "":
         st.caption(f"前回値：{_text_default(global_latest.get('track_meet'), '')}")
 
@@ -662,6 +504,7 @@ def render_portfolio_fixed(st, storage):
     day_url = _latest_non_empty(dfp, "video_url")
     day_vnote = _latest_non_empty(dfp, "video_note")
 
+    # チェックボックスは「当該日が未記入なら False」を維持（=既存を壊さない）
     tcenter = st.checkbox("トレセン（tcenter）", value=bool(day_tcenter), key="pf_tcenter")
     _prev_bool_caption(st, global_latest.get("tcenter"))
 
@@ -695,6 +538,10 @@ def render_portfolio_fixed(st, storage):
 
     # ======================
     # 保存（行追加）
+    #  - 数値は0なら保存しない（空白扱い）
+    #  - 文字列は空なら保存しない
+    #  - tcenterは履歴として残すため常に保存（False/True）
+    #  - bmiは基本保存しない（Sheets数式運用）
     # ======================
     if st.button("保存（行追加）", type="primary", use_container_width=True):
         row = {"date": str(selected_date)}
@@ -794,11 +641,20 @@ with st.sidebar:
 
     st.divider()
     st.caption("ページ")
-    page = st.radio("ページ", ["トレーニング", "ポートフォリオ"], index=0, label_visibility="collapsed")
+    page = st.radio(
+        "ページ",
+        ["トレーニング", "ポートフォリオ", "ROADMAP"],
+        index=0,
+        label_visibility="collapsed",
+    )
 
 # ======================
 # ページ切替
 # ======================
+if page == "ROADMAP":
+    render_roadmap(st, storage)
+    st.stop()
+
 if page == "ポートフォリオ":
     render_portfolio_fixed(st, storage)
     st.stop()
