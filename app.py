@@ -682,4 +682,28 @@ with st.expander("共通ルール（必読）", expanded=True):
         st.write(f"・{r}")
 
 # ======================
-# 毎
+# 毎日（共通）
+# ======================
+render_daily(st, storage, selected_date, weekday_key)
+
+st.divider()
+
+# ======================
+# OFF or DAYトレ
+# ======================
+if day_key == "OFF":
+    render_box_breath_ui(st, key_prefix=f"box_{selected_date}_OFF")
+    st.divider()
+    st.info("今日はOFF（回復日）です。**ストレッチ10〜15分だけは必ず**やりましょう。")
+else:
+    render_day_training(st, storage, selected_date, weekday_key, day_key, train_df)
+
+    st.divider()
+    render_weight(st, storage, selected_date, weekday_key)
+
+# ======================
+# 親ビュー（集計）
+# ======================
+if parent_view:
+    st.divider()
+    render_parent_view(st, storage)
