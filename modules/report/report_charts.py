@@ -1,55 +1,19 @@
 # modules/report/report_charts.py
 from __future__ import annotations
 
+import os
+
 # matplotlib は Cloud 環境で未導入のことがあるため optional import
 try:
     import matplotlib.pyplot as plt
+    from matplotlib import font_manager as fm
     from matplotlib.ticker import FuncFormatter
     HAS_MPL = True
 except Exception:
     plt = None
+    fm = None
     FuncFormatter = None
     HAS_MPL = False
-
-
-def _enable_japanese_font():
-    """
-    Streamlit Cloud で日本語が「□」になる問題対策。
-    最優先：japanize-matplotlib（requirements に追加推奨）
-    """
-    if not HAS_MPL:
-        return
-
-    # 1) まず japanize_matplotlib を試す（これが一番安定）
-    try:
-        import japanize_matplotlib  # noqa: F401
-        return
-    except Exception:
-        pass
-
-    # 2) フォールバック：環境にある日本語フォントを探して設定
-    # （Cloud環境によっては入ってない場合あり。その場合は □ のまま）
-    try:
-        from matplotlib import font_manager, rcParams
-
-        candidates = [
-            "Noto Sans CJK JP",
-            "Noto Sans JP",
-            "IPAexGothic",
-            "IPAPGothic",
-            "TakaoGothic",
-            "Yu Gothic",
-            "Hiragino Sans",
-            "MS Gothic",
-        ]
-
-        available = {f.name for f in font_manager.fontManager.ttflist}
-        for name in candidates:
-            if name in available:
-                rcParams["font.family"] = name
-                return
-    except Exception:
-        pass
 
 
 def _require_mpl():
@@ -57,29 +21,161 @@ def _require_mpl():
         raise ModuleNotFoundError(
             "matplotlib is required for report charts, but it is not installed."
         )
-    _enable_japanese_font()
-    # マイナス記号が文字化けする環境対策
+
+
+# =========================================================
+# 日本語フォント対策（□ □ □ を直す本丸）
+# =========================================================
+def _setup_japanese_font():
+    """
+    Streamlit Cloud などは日本語フォントが入っていないことが多く、
+    その場合 matplotlib は日本語を □□ で描画してしまう。
+
+    対策：
+      1) リポジトリにフォントを同梱（assets/fonts/）
+      2) addfont して font.family を指定
+
+    同梱フォント候補（どれか1つでOK）:
+      - assets/fonts/NotoSansJP-Regular.otf
+      - assets/fonts/IPAexGothic.ttf
+    """
+    _require_mpl()
+
+    # 1) 同梱フォントがあれば最優先で使う
+    here = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(here, "..", ".."))  # modules/report -> project root
+    candidates = [
+        os.path.join(project_root, "assets", "fonts", "NotoSansJP-Regular.otf"),
+        os.path.join(project_root, "assets", "fonts", "NotoSansJP-Regular.ttf"),
+        os.path.join(project_root, "assets", "fonts", "IPAexGothic.ttf"),
+        os.path.join(project_root, "assets", "fonts", "ipag.ttf"),
+        os.path.join(project_root, "assets", "fonts", "ipam.ttf"),
+    ]
+
+    for fp in candidates:
+        if os.path.exists(fp):
+            try:
+                fm.fontManager.addfont(fp)
+                prop = fm.FontProperties(fname=fp)
+                name = prop.get_name()
+                plt.rcParams["font.family"] = name
+                plt.rcParams["axes.unicode_minus"] = False
+                return True
+            except Exception:
+                pass
+
+    # 2) 環境側に入っている日本語フォントを探す（入っていればOK）
+    preferred_names = [
+        "Noto Sans CJK JP",
+        "Noto Sans JP",
+        "IPAexGothic",
+        "IPAGothic",
+        "Yu Gothic",
+        "MS Gothic",
+        "TakaoGothic",
+        "Hiragino Sans",
+    ]
     try:
-        import matplotlib as mpl
-        mpl.rcParams["axes.unicode_minus"] = False
+        installed = {f.name for f in fm.fontManager.ttflist}
+        for name in preferred_names:
+            if name in installed:
+                plt.rcParams["font.family"] = name
+                plt.rcParams["axes.unicode_minus"] = False
+                return True
     except Exception:
         pass
+
+    # 3) 見つからない場合：現状のまま（□□になる）
+    #    ただし、ここまで来たら「フォント同梱が必要」が確定
+    return False
 
 
 # =========================================================
 # 共通ユーティリティ
 # =========================================================
-def _date_range_label(report) -> str:
-    """タイトルに入れる期間表示（YYYY-MM-DD 〜 YYYY-MM-DD）"""
+def _format_date_range(df):
+    """
+    df["date"] は文字列 or datetime が来る想定
+    """
+    if df is None or df.empty or "date" not in df.columns:
+        return ""
     try:
-        df = report.portfolio
-        if df is None or df.empty:
+        import pandas as pd
+        dt = pd.to_datetime(df["date"], errors="coerce")
+        dt = dt.dropna()
+        if dt.empty:
             return ""
-        start = str(df["date"].iloc[0])
-        end = str(df["date"].iloc[-1])
-        return f"{start} 〜 {end}"
+        start = dt.min().date().isoformat()
+        end = dt.max().date().isoformat()
+        return f"{start} ～ {end}"
+    except Exception:
+        # 文字列フォールバック
+        try:
+            vals = [str(x) for x in df["date"].tolist() if str(x).strip()]
+            if not vals:
+                return ""
+            return f"{vals[0]} ～ {vals[-1]}"
+        except Exception:
+            return ""
+
+
+def _annotate_latest(ax, x_vals, y_vals, text, dy=0):
+    """
+    最後の点に注釈
+    """
+    if x_vals is None or y_vals is None:
+        return
+    if len(x_vals) == 0 or len(y_vals) == 0:
+        return
+    try:
+        x = x_vals[-1]
+        y = y_vals[-1]
+        if y is None:
+            return
+        ax.annotate(
+            text,
+            xy=(x, y),
+            xytext=(8, dy),
+            textcoords="offset points",
+            fontsize=10,
+            va="center",
+        )
+    except Exception:
+        return
+
+
+def _sec_to_mmss(sec):
+    """
+    秒 -> m:ss（無効値は ""）
+    """
+    try:
+        if sec is None:
+            return ""
+        s = float(sec)
+        if s <= 0:
+            return ""
+        m = int(s) // 60
+        r = int(round(s)) % 60
+        return f"{m}:{r:02d}"
     except Exception:
         return ""
+
+
+def _mmss_axis_formatter():
+    """
+    matplotlib のY軸を mm:ss 表示にする formatter
+    """
+    def _fmt(y, _pos=None):
+        try:
+            s = float(y)
+            if s <= 0:
+                return ""
+            m = int(s) // 60
+            r = int(round(s)) % 60
+            return f"{m}:{r:02d}"
+        except Exception:
+            return ""
+    return FuncFormatter(_fmt)
 
 
 def _setup_ax(ax, title: str, ylabel_left: str | None = None, ylabel_right: str | None = None):
@@ -91,85 +187,40 @@ def _setup_ax(ax, title: str, ylabel_left: str | None = None, ylabel_right: str 
         ax.right_ax.set_ylabel(ylabel_right)
 
 
-def _annotate_latest(ax, x_values, y_values, text: str, dx: int = 8, dy: int = 0):
-    """最新点に数値注釈（右側に表示）"""
-    try:
-        if x_values is None or y_values is None:
-            return
-        if len(x_values) == 0 or len(y_values) == 0:
-            return
-        x = x_values[-1]
-        y = y_values[-1]
-        if y is None:
-            return
-        ax.annotate(
-            text,
-            xy=(x, y),
-            xytext=(dx, dy),
-            textcoords="offset points",
-            va="center",
-            fontsize=10,
-        )
-    except Exception:
-        return
-
-
-def _sec_to_mmss(sec: float) -> str:
-    try:
-        s = float(sec)
-        if s <= 0:
-            return "—"
-        m = int(s) // 60
-        ss = int(round(s)) % 60
-        return f"{m}:{ss:02d}"
-    except Exception:
-        return "—"
-
-
-def _fmt_mmss_tick(x, _pos=None):
-    return _sec_to_mmss(x)
-
-
 # =========================================================
 # P2: フィジカル（身長・体重・BMI）
 # =========================================================
 def fig_physical_height_weight_bmi(report, show_roadmap: bool = True):
     _require_mpl()
+    _setup_japanese_font()
 
     df = report.portfolio
-    period = _date_range_label(report)
+    dr = _format_date_range(df)
 
     fig, ax1 = plt.subplots(figsize=(8, 4))
     ax2 = ax1.twinx()
     ax1.right_ax = ax2  # util 用
 
-    # データ
     x = df["date"].tolist()
-    h = df["height_cm"].tolist() if "height_cm" in df.columns else []
-    w = df["weight_kg"].tolist() if "weight_kg" in df.columns else []
-    b = df["bmi"].tolist() if "bmi" in df.columns else None
+    y_h = df["height_cm"].tolist()
+    y_w = df["weight_kg"].tolist()
 
-    # 描画
-    if h:
-        ax1.plot(x, h, label="身長 (cm)")
-        _annotate_latest(ax1, x, h, f"{h[-1]:.1f}cm", dx=8, dy=10)
+    ax1.plot(df["date"], df["height_cm"], label="身長（cm）", color="tab:blue")
+    ax2.plot(df["date"], df["weight_kg"], label="体重（kg）", color="tab:orange")
+    if "bmi" in df.columns:
+        ax2.plot(df["date"], df["bmi"], label="BMI", color="tab:green", linestyle="--")
 
-    if w:
-        ax2.plot(x, w, label="体重 (kg)")
-        _annotate_latest(ax2, x, w, f"{w[-1]:.1f}kg", dx=8, dy=-10)
+    title = "フィジカル成長（身長・体重・BMI）"
+    if dr:
+        title = f"{title}\n{dr}"
 
-    if b is not None:
-        ax2.plot(x, b, label="BMI", linestyle="--")
-        try:
-            _annotate_latest(ax2, x, b, f"{float(b[-1]):.1f}", dx=8, dy=12)
-        except Exception:
-            pass
+    _setup_ax(ax1, title, "身長（cm）", "体重（kg） / BMI")
 
-    title = "フィジカル推移"
-    if period:
-        title = f"{title}\n{period}"
-
-    _setup_ax(ax1, title, "身長 (cm)", "体重 / BMI")
+    # 最新値注釈
+    if len(y_h) > 0:
+        _annotate_latest(ax1, x, y_h, f"{y_h[-1]:.1f}cm", dy=0)
+    if len(y_w) > 0:
+        _annotate_latest(ax2, x, y_w, f"{y_w[-1]:.1f}kg", dy=0)
 
     ax1.legend(loc="upper left")
     ax2.legend(loc="upper right")
@@ -188,37 +239,35 @@ def fig_run_metric(
     mmss: bool = False,
 ):
     _require_mpl()
+    _setup_japanese_font()
 
     df = report.portfolio
-    period = _date_range_label(report)
+    dr = _format_date_range(df)
 
     fig, ax = plt.subplots(figsize=(8, 4))
 
     x = df["date"].tolist()
-    y = df[metric].tolist() if metric in df.columns else []
+    y = df[metric].tolist()
 
-    ax.plot(x, y, marker="o")
+    ax.plot(df["date"], df[metric], marker="o")
 
-    # タイトル（期間つき）
-    full_title = title
-    if period:
-        full_title = f"{title}\n{period}"
-    ax.set_title(full_title)
+    # タイトル（期間表示つき）
+    t = title
+    if dr:
+        t = f"{t}\n{dr}"
+    ax.set_title(t)
 
-    # 軸ラベル＆mm:ss
+    # ラベル＆軸
     if mmss:
-        ax.set_ylabel("タイム (分:秒)")
-        ax.yaxis.set_major_formatter(FuncFormatter(_fmt_mmss_tick))
-        # 最新値注釈も mm:ss
-        if y:
-            _annotate_latest(ax, x, y, _sec_to_mmss(y[-1]))
+        ax.set_ylabel("タイム（分:秒）")
+        ax.yaxis.set_major_formatter(_mmss_axis_formatter())
+        latest_txt = _sec_to_mmss(y[-1]) if len(y) > 0 else ""
+        if latest_txt:
+            _annotate_latest(ax, x, y, latest_txt)
     else:
-        ax.set_ylabel("タイム (秒)")
-        if y:
-            try:
-                _annotate_latest(ax, x, y, f"{float(y[-1]):.2f}s")
-            except Exception:
-                pass
+        ax.set_ylabel("タイム（秒）")
+        if len(y) > 0 and y[-1] is not None:
+            _annotate_latest(ax, x, y, f"{float(y[-1]):.2f}s")
 
     ax.grid(True, axis="y", alpha=0.3)
 
@@ -230,37 +279,34 @@ def fig_run_metric(
 # =========================================================
 def fig_academic_position(report, show_roadmap: bool = True):
     _require_mpl()
+    _setup_japanese_font()
 
     df = report.portfolio
-    period = _date_range_label(report)
+    dr = _format_date_range(df)
 
     fig, ax1 = plt.subplots(figsize=(8, 4))
     ax2 = ax1.twinx()
     ax1.right_ax = ax2
 
     x = df["date"].tolist()
-    r = df["rank"].tolist() if "rank" in df.columns else []
-    d = df["deviation"].tolist() if "deviation" in df.columns else []
+    y_rank = df["rank"].tolist()
+    y_dev = df["deviation"].tolist()
 
-    if r:
-        ax1.plot(x, r, label="学年順位", linewidth=2)
-        try:
-            _annotate_latest(ax1, x, r, f"{float(r[-1]):.0f}位", dx=8, dy=10)
-        except Exception:
-            pass
+    ax1.plot(df["date"], df["rank"], label="順位", color="tab:red")
+    ax2.plot(df["date"], df["deviation"], label="偏差値", color="tab:blue")
 
-    if d:
-        ax2.plot(x, d, label="偏差値")
-        try:
-            _annotate_latest(ax2, x, d, f"{float(d[-1]):.1f}", dx=8, dy=-10)
-        except Exception:
-            pass
+    title = "学業（順位・偏差値）"
+    if dr:
+        title = f"{title}\n{dr}"
 
-    title = "学業：順位・偏差値"
-    if period:
-        title = f"{title}\n{period}"
+    _setup_ax(ax1, title, "順位", "偏差値")
 
-    _setup_ax(ax1, title, "順位 (位)", "偏差値")
+    # 最新値注釈
+    if len(y_rank) > 0 and y_rank[-1] is not None:
+        _annotate_latest(ax1, x, y_rank, f"{float(y_rank[-1]):.0f}", dy=0)
+    if len(y_dev) > 0 and y_dev[-1] is not None:
+        _annotate_latest(ax2, x, y_dev, f"{float(y_dev[-1]):.1f}", dy=0)
+
     ax1.legend(loc="upper left")
     ax2.legend(loc="upper right")
 
@@ -272,26 +318,20 @@ def fig_academic_position(report, show_roadmap: bool = True):
 # =========================================================
 def fig_academic_scores_rating(report, show_roadmap: bool = True):
     _require_mpl()
+    _setup_japanese_font()
 
     df = report.portfolio
-    period = _date_range_label(report)
+    dr = _format_date_range(df)
 
     fig, ax1 = plt.subplots(figsize=(8, 4))
     ax2 = ax1.twinx()
     ax1.right_ax = ax2
 
     x = df["date"].tolist()
+    y_rating = df["rating"].tolist()
 
-    # 評点（左）
-    if "rating" in df.columns:
-        rating = df["rating"].tolist()
-        ax1.plot(x, rating, label="評点", linewidth=2)
-        try:
-            _annotate_latest(ax1, x, rating, f"{float(rating[-1]):.1f}", dx=8, dy=10)
-        except Exception:
-            pass
+    ax1.plot(df["date"], df["rating"], label="評点", color="black", linewidth=2)
 
-    # 各教科（右）
     subject_map = {
         "score_jp": "国語",
         "score_math": "数学",
@@ -299,16 +339,21 @@ def fig_academic_scores_rating(report, show_roadmap: bool = True):
         "score_sci": "理科",
         "score_soc": "社会",
     }
-    for col, jp in subject_map.items():
+
+    for col in ["score_jp", "score_math", "score_en", "score_sci", "score_soc"]:
         if col in df.columns:
-            y = df[col].tolist()
-            ax2.plot(x, y, label=jp)
+            ax2.plot(df["date"], df[col], label=subject_map.get(col, col))
 
-    title = "学業：評点・教科スコア"
-    if period:
-        title = f"{title}\n{period}"
+    title = "学業（評点・各教科スコア）"
+    if dr:
+        title = f"{title}\n{dr}"
 
-    _setup_ax(ax1, title, "評点", "得点")
+    _setup_ax(ax1, title, "評点", "各教科スコア")
+
+    # 最新値注釈（評点だけ）
+    if len(y_rating) > 0 and y_rating[-1] is not None:
+        _annotate_latest(ax1, x, y_rating, f"{float(y_rating[-1]):.1f}", dy=0)
+
     ax1.legend(loc="upper left")
     ax2.legend(loc="upper right", fontsize=8)
 
