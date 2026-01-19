@@ -268,7 +268,6 @@ def _compute_global_latest_values(dfp_all):
 
     # tcenter は最後に見つかった bool を採用（無ければFalseとして扱えるが、前回値表示は None で抑制）
     if "tcenter" in df.columns:
-        # 末尾から1つ見つける（true/false系のみ）
         vals = df["tcenter"].tolist()
         found = None
         for v in reversed(vals):
@@ -291,7 +290,6 @@ def _compute_global_latest_values(dfp_all):
             for v in df[col].tolist():
                 if _is_blank_like(v):
                     continue
-                # 文字列の "0" も無効扱いに寄せる
                 if isinstance(v, str):
                     vv = v.strip()
                     if vv in ["0", "0.0"]:
@@ -305,10 +303,6 @@ def _compute_global_latest_values(dfp_all):
 
 # ======================
 # portfolio UI（固定入力 / 日付連動）
-#  - 0は保存しない（空白扱い）
-#  - 入力欄は「選択日付の値」があれば反映、なければ空（=0）
-#  - 前回値は「全期間の最新の入力値（dateソート後の最新非空）」を常に表示
-#  - 1500/3000は「分＋秒」入力 → 保存時に秒へ変換
 # ======================
 def render_portfolio_fixed(st, storage):
     st.subheader("ポートフォリオ（実績/成長記録）")
@@ -325,17 +319,12 @@ def render_portfolio_fixed(st, storage):
         st.error(msg)
         return
 
-    # 全件を読む（この後、selected_date で絞る）
     dfp_all = storage.load_all_portfolio()
-
-    # ★全期間の「前回値（最新）」を作る（dateソート基準）
     global_latest = _compute_global_latest_values(dfp_all)
 
-    # ① 基本（まず日付を選ばせる）
     st.markdown("### ① 基本")
     selected_date = st.date_input("日付", value=date.today(), key="pf_date")
 
-    # 選択日のみ抽出
     dfp = _filter_portfolio_by_date(dfp_all, selected_date)
 
     if dfp is None or dfp.empty:
@@ -343,9 +332,6 @@ def render_portfolio_fixed(st, storage):
     else:
         st.success("この日付の記録を読み込みました（同日の最新値を入力欄に反映）")
 
-    # ----------------------
-    # ② 体（身長/体重）
-    # ----------------------
     st.markdown("### ② 体（body）")
     c1, c2 = st.columns(2)
 
@@ -372,18 +358,14 @@ def render_portfolio_fixed(st, storage):
     )
     _prev_caption(c2, global_latest.get("weight_kg"))
 
-    bmi_preview = None
     if height_cm > 0 and weight_kg > 0:
         bmi_preview = weight_kg / ((height_cm / 100.0) ** 2)
         st.caption(f"BMI（参考）: {bmi_preview:.2f}  ※保存はシート数式でもOK")
     else:
         st.caption("BMI（参考）: —  ※保存はシート数式でもOK")
 
-    # ----------------------
-    # ③ 陸上（タイム）
-    # ----------------------
     st.markdown("### ③ 陸上（track）")
-    day_50 = _latest_non_empty(dfp, "run_100m_sec")  # 列名は互換維持（UIは50m）
+    day_50 = _latest_non_empty(dfp, "run_100m_sec")
     day_1500 = _latest_non_empty(dfp, "run_1500m_sec")
     day_3000 = _latest_non_empty(dfp, "run_3000m_sec")
     day_meet = _latest_non_empty(dfp, "track_meet")
@@ -396,7 +378,7 @@ def render_portfolio_fixed(st, storage):
         max_value=9999.0,
         value=_num_default(day_50, 0.0),
         step=0.01,
-        key="pf_run_100",  # 既存key維持
+        key="pf_run_100",
     )
     _prev_caption(cc1, global_latest.get("run_100m_sec"))
 
@@ -405,42 +387,14 @@ def render_portfolio_fixed(st, storage):
 
     cc2.markdown("**1500m (min:sec)**")
     m1500, s1500 = cc2.columns([1, 1])
-    run_1500_min = m1500.number_input(
-        "分",
-        min_value=0,
-        max_value=999,
-        value=int(d1500_m),
-        step=1,
-        key="pf_run_1500_min",
-    )
-    run_1500_sec = s1500.number_input(
-        "秒",
-        min_value=0,
-        max_value=59,
-        value=int(d1500_s),
-        step=1,
-        key="pf_run_1500_sec",
-    )
+    run_1500_min = m1500.number_input("分", min_value=0, max_value=999, value=int(d1500_m), step=1, key="pf_run_1500_min")
+    run_1500_sec = s1500.number_input("秒", min_value=0, max_value=59, value=int(d1500_s), step=1, key="pf_run_1500_sec")
     _prev_time_caption(cc2, global_latest.get("run_1500m_sec"))
 
     cc3.markdown("**3000m (min:sec)**")
     m3000, s3000 = cc3.columns([1, 1])
-    run_3000_min = m3000.number_input(
-        "分 ",
-        min_value=0,
-        max_value=999,
-        value=int(d3000_m),
-        step=1,
-        key="pf_run_3000_min",
-    )
-    run_3000_sec = s3000.number_input(
-        "秒 ",
-        min_value=0,
-        max_value=59,
-        value=int(d3000_s),
-        step=1,
-        key="pf_run_3000_sec",
-    )
+    run_3000_min = m3000.number_input("分 ", min_value=0, max_value=999, value=int(d3000_m), step=1, key="pf_run_3000_min")
+    run_3000_sec = s3000.number_input("秒 ", min_value=0, max_value=59, value=int(d3000_s), step=1, key="pf_run_3000_sec")
     _prev_time_caption(cc3, global_latest.get("run_3000m_sec"))
 
     run_1500_total = int(run_1500_min) * 60 + int(run_1500_sec)
@@ -449,18 +403,10 @@ def render_portfolio_fixed(st, storage):
     cc2.caption(f"入力値：{run_1500_min}:{int(run_1500_sec):02d}（{run_1500_total} sec）" if run_1500_total > 0 else "入力値：—")
     cc3.caption(f"入力値：{run_3000_min}:{int(run_3000_sec):02d}（{run_3000_total} sec）" if run_3000_total > 0 else "入力値：—")
 
-    track_meet = st.text_input(
-        "陸上大会名（任意）",
-        value=_text_default(day_meet, ""),
-        key="pf_track_meet",
-    )
-    # テキストは前回値を入力欄に残さない方針なので、必要なら表示のみ（caption）に出す
+    track_meet = st.text_input("陸上大会名（任意）", value=_text_default(day_meet, ""), key="pf_track_meet")
     if _text_default(global_latest.get("track_meet"), "") != "":
         st.caption(f"前回値：{_text_default(global_latest.get('track_meet'), '')}")
 
-    # ----------------------
-    # ④ 学業（テスト）
-    # ----------------------
     st.markdown("### ④ 学業（school）")
     day_rank = _latest_non_empty(dfp, "rank")
     day_dev = _latest_non_empty(dfp, "deviation")
@@ -497,9 +443,6 @@ def render_portfolio_fixed(st, storage):
     score_soc = t5.number_input("社会", min_value=0.0, max_value=200.0, value=_num_default(day_soc, 0.0), step=1.0, key="pf_score_soc")
     _prev_caption(t5, global_latest.get("score_soc"))
 
-    # ----------------------
-    # ⑤ サッカー（実績）
-    # ----------------------
     st.markdown("### ⑤ サッカー（soccer）")
     day_tcenter = _latest_bool(dfp, "tcenter")
     day_soc_tour = _latest_non_empty(dfp, "soccer_tournament")
@@ -507,7 +450,6 @@ def render_portfolio_fixed(st, storage):
     day_url = _latest_non_empty(dfp, "video_url")
     day_vnote = _latest_non_empty(dfp, "video_note")
 
-    # チェックボックスは「当該日が未記入なら False」を維持（=既存を壊さない）
     tcenter = st.checkbox("トレセン（tcenter）", value=bool(day_tcenter), key="pf_tcenter")
     _prev_bool_caption(st, global_latest.get("tcenter"))
 
@@ -528,9 +470,6 @@ def render_portfolio_fixed(st, storage):
     if _text_default(global_latest.get("video_note"), "") != "":
         v2.caption(f"前回値：{_text_default(global_latest.get('video_note'), '')}")
 
-    # ----------------------
-    # ⑥ 自由記述
-    # ----------------------
     st.markdown("### ⑥ 自由記述（note）")
     day_note = _latest_non_empty(dfp, "note")
     note = st.text_area("メモ（note）", value=_text_default(day_note, ""), height=120, key="pf_note")
@@ -539,13 +478,6 @@ def render_portfolio_fixed(st, storage):
 
     st.divider()
 
-    # ======================
-    # 保存（行追加）
-    #  - 数値は0なら保存しない（空白扱い）
-    #  - 文字列は空なら保存しない
-    #  - tcenterは履歴として残すため常に保存（False/True）
-    #  - bmiは基本保存しない（Sheets数式運用）
-    # ======================
     if st.button("保存（行追加）", type="primary", use_container_width=True):
         row = {"date": str(selected_date)}
 
@@ -554,9 +486,6 @@ def render_portfolio_fixed(st, storage):
         if weight_kg != 0:
             row["weight_kg"] = float(weight_kg)
 
-        # bmi：保存しない（Sheets側の式でOK）
-
-        # 50m（列名は互換維持：run_100m_sec）
         if run_50 != 0:
             row["run_100m_sec"] = float(run_50)
 
@@ -586,7 +515,6 @@ def render_portfolio_fixed(st, storage):
         if score_soc != 0:
             row["score_soc"] = float(score_soc)
 
-        # tcenterは常に保存
         row["tcenter"] = bool(tcenter)
 
         if str(soccer_tournament).strip():
@@ -617,6 +545,72 @@ storage = build_storage(st)  # secrets があれば Sheets、なければ CSV
 train_df = load_training_list()
 
 # ======================
+# ★互換パッチ：親ビューが要求する load_all_records を SheetsStorage に付与
+# ======================
+def _attach_load_all_records_compat(storage_obj):
+    """
+    render_parent_view() が storage.load_all_records() を要求するが、
+    SheetsStorage に未実装のケースがあるため互換メソッドを付与する。
+    """
+    if hasattr(storage_obj, "load_all_records"):
+        return
+
+    import types
+
+    def load_all_records(self):
+        import pandas as pd
+
+        # 1) 既に似たメソッドがあるならそれを使う（壊さない）
+        candidate_methods = [
+            "load_all_log",
+            "load_all_logs",
+            "load_all_train_log",
+            "load_all_training_log",
+            "load_all_training",
+            "load_all_records_df",
+            "load_all",
+        ]
+        for m in candidate_methods:
+            if hasattr(self, m) and callable(getattr(self, m)):
+                return getattr(self, m)()
+
+        # 2) 直接 worksheet を掴めるなら読む
+        candidate_ws_attrs = [
+            "log_ws", "ws", "worksheet", "_ws", "_worksheet",
+            "log_worksheet", "sheet", "_sheet",
+        ]
+        for a in candidate_ws_attrs:
+            ws = getattr(self, a, None)
+            if ws is None:
+                continue
+
+            # gspread worksheet: get_all_records()
+            if hasattr(ws, "get_all_records"):
+                rows = ws.get_all_records()
+                return pd.DataFrame(rows)
+
+            # gspread worksheet: get_all_values()
+            if hasattr(ws, "get_all_values"):
+                values = ws.get_all_values()
+                if not values or len(values) < 2:
+                    return pd.DataFrame()
+                header = values[0]
+                body = values[1:]
+                return pd.DataFrame(body, columns=header)
+
+        # 3) 最後の手段：infoに worksheet 名があれば storage 側が持つAPIで取得できるか試す
+        if hasattr(self, "get_info") and callable(getattr(self, "get_info")):
+            info = self.get_info() or {}
+            # ここでは無理に推測して破壊しない。見つからない場合は明示的に落とす。
+        raise AttributeError("SheetsStorage compatible loader could not find worksheet object to read all records.")
+
+    storage_obj.load_all_records = types.MethodType(load_all_records, storage_obj)
+
+
+_attach_load_all_records_compat(storage)
+
+
+# ======================
 # UI
 # ======================
 st.title("FA期間 自主トレチェック")
@@ -638,7 +632,6 @@ with st.sidebar:
             st.caption(f"worksheet: {info['worksheet']}")
         if "portfolio_worksheet" in info:
             st.caption(f"portfolio_worksheet: {info['portfolio_worksheet']}")
-        # roadmap_worksheet は storage.get_info() が返していれば表示（互換のため任意）
         if "roadmap_worksheet" in info:
             st.caption(f"roadmap_worksheet: {info['roadmap_worksheet']}")
 
