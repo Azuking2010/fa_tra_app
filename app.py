@@ -551,16 +551,50 @@ def _attach_load_all_records_compat(storage_obj):
     """
     render_parent_view() が storage.load_all_records() を要求するが、
     SheetsStorage に未実装のケースがあるため互換メソッドを付与する。
+
+    今回は「storageがworksheetを公開してない」ケースでも動くように、
+    storage内部の spreadsheet/client を使って worksheet(name) を開き直して読む。
     """
     if hasattr(storage_obj, "load_all_records"):
         return
 
     import types
 
+    def _find_spreadsheet_and_wsname(self):
+        """
+        storage.get_info() にある worksheet 名と、
+        storage内部の spreadsheet / client っぽい属性から Spreadsheet を取り出す。
+        """
+        info = {}
+        if hasattr(self, "get_info") and callable(getattr(self, "get_info")):
+            info = self.get_info() or {}
+
+        ws_name = info.get("worksheet") or info.get("log_worksheet") or "log"
+        ss_id = info.get("spreadsheet_id")
+
+        # 1) 既にSpreadsheetを持っている場合（sh/spreadsheetなど）
+        for attr in ["sh", "spreadsheet", "_sh", "_spreadsheet", "ss", "_ss"]:
+            sh = getattr(self, attr, None)
+            if sh is not None and hasattr(sh, "worksheet"):
+                return sh, ws_name
+
+        # 2) gspread client を持っている場合（gc/clientなど）→ open_by_key
+        for attr in ["gc", "client", "_gc", "_client", "gclient"]:
+            gc = getattr(self, attr, None)
+            if gc is not None and ss_id and hasattr(gc, "open_by_key"):
+                try:
+                    sh = gc.open_by_key(ss_id)
+                    if sh is not None and hasattr(sh, "worksheet"):
+                        return sh, ws_name
+                except Exception:
+                    pass
+
+        return None, ws_name
+
     def load_all_records(self):
         import pandas as pd
 
-        # 1) 既に似たメソッドがあるならそれを使う（壊さない）
+        # 0) 既に似たメソッドがあるならそれを使う（壊さない）
         candidate_methods = [
             "load_all_log",
             "load_all_logs",
@@ -574,7 +608,7 @@ def _attach_load_all_records_compat(storage_obj):
             if hasattr(self, m) and callable(getattr(self, m)):
                 return getattr(self, m)()
 
-        # 2) 直接 worksheet を掴めるなら読む
+        # 1) worksheetオブジェクトが公開されているなら読む
         candidate_ws_attrs = [
             "log_ws", "ws", "worksheet", "_ws", "_worksheet",
             "log_worksheet", "sheet", "_sheet",
@@ -583,13 +617,9 @@ def _attach_load_all_records_compat(storage_obj):
             ws = getattr(self, a, None)
             if ws is None:
                 continue
-
-            # gspread worksheet: get_all_records()
             if hasattr(ws, "get_all_records"):
                 rows = ws.get_all_records()
                 return pd.DataFrame(rows)
-
-            # gspread worksheet: get_all_values()
             if hasattr(ws, "get_all_values"):
                 values = ws.get_all_values()
                 if not values or len(values) < 2:
@@ -598,16 +628,36 @@ def _attach_load_all_records_compat(storage_obj):
                 body = values[1:]
                 return pd.DataFrame(body, columns=header)
 
-        # 3) 最後の手段：infoに worksheet 名があれば storage 側が持つAPIで取得できるか試す
-        if hasattr(self, "get_info") and callable(getattr(self, "get_info")):
-            info = self.get_info() or {}
-            # ここでは無理に推測して破壊しない。見つからない場合は明示的に落とす。
-        raise AttributeError("SheetsStorage compatible loader could not find worksheet object to read all records.")
+        # 2) 公開されてない場合でも、spreadsheetから worksheet名で開き直す
+        sh, ws_name = _find_spreadsheet_and_wsname(self)
+        if sh is not None:
+            try:
+                ws = sh.worksheet(ws_name)
+                rows = ws.get_all_records()
+                return pd.DataFrame(rows)
+            except Exception:
+                # get_all_values フォールバック
+                try:
+                    ws = sh.worksheet(ws_name)
+                    values = ws.get_all_values()
+                    if not values or len(values) < 2:
+                        return pd.DataFrame()
+                    header = values[0]
+                    body = values[1:]
+                    return pd.DataFrame(body, columns=header)
+                except Exception as e:
+                    raise RuntimeError(f"Failed to read worksheet '{ws_name}' from spreadsheet: {e}")
+
+        # 3) ここまで全部ダメなら、storage構造の情報が足りない
+        raise AttributeError(
+            "SheetsStorage compatible loader could not find spreadsheet/client to read all records."
+        )
 
     storage_obj.load_all_records = types.MethodType(load_all_records, storage_obj)
 
 
 _attach_load_all_records_compat(storage)
+
 
 
 # ======================
