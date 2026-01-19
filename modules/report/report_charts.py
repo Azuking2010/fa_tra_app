@@ -25,11 +25,8 @@ def _require_mpl():
 
 # =========================================================
 # 日本語フォント（Noto Sans JP）設定
-#  - Streamlit Cloud では OS に日本語フォントが無いことが多いので
-#    assets/fonts 以下に ttf を置いてそれを読む
 # =========================================================
 _JP_FONT_PATHS = [
-    # あなたの構成（スクショ）に合わせた候補
     "assets/fonts/Noto_Sans_JP/NotoSansJP-VariableFont_wght.ttf",
     "assets/fonts/NotoSansJP-VariableFont_wght.ttf",
     "assets/fonts/NotoSansJP-Regular.ttf",
@@ -37,12 +34,10 @@ _JP_FONT_PATHS = [
 
 
 def _apply_japanese_font():
-    """日本語が □□ になる対策：ローカルTTFを読み込んで Matplotlib に設定する。"""
     _require_mpl()
     if fm is None or os is None:
         return
 
-    # 既に設定済みなら二重登録しない
     if getattr(_apply_japanese_font, "_done", False):
         return
 
@@ -59,7 +54,6 @@ def _apply_japanese_font():
             plt.rcParams["font.family"] = fp.get_name()
             plt.rcParams["axes.unicode_minus"] = False
         except Exception:
-            # フォント登録に失敗しても落とさない（英語表示にフォールバック）
             pass
 
     _apply_japanese_font._done = True
@@ -78,7 +72,6 @@ def _setup_ax(ax, title: str, ylabel_left: str | None = None, ylabel_right: str 
 
 
 def _period_str(df):
-    """df['date'] の min〜max を 'YYYY-MM-DD 〜 YYYY-MM-DD' にする"""
     if df is None or df.empty or "date" not in df.columns:
         return ""
     try:
@@ -92,9 +85,6 @@ def _period_str(df):
 
 
 def _annotate_latest(ax, x, y, text: str):
-    """最新点（最後の点）に注釈を付ける"""
-    if x is None or y is None:
-        return
     try:
         ax.annotate(
             text,
@@ -109,7 +99,6 @@ def _annotate_latest(ax, x, y, text: str):
 
 
 def _sec_to_mmss_str(sec):
-    """秒 -> m:ss（不正値は空）"""
     try:
         if sec is None:
             return ""
@@ -125,7 +114,6 @@ def _sec_to_mmss_str(sec):
 
 
 def _mmss_axis_formatter():
-    """y軸の数値(=秒)を mm:ss 表示にする Formatter"""
     def _fmt(v, pos=None):
         try:
             if v is None:
@@ -142,6 +130,38 @@ def _mmss_axis_formatter():
     return FuncFormatter(_fmt)
 
 
+def _normalize_time_to_seconds(values):
+    """
+    どんな単位で来ても「秒」に揃えるための安全策。
+    - 通常想定：秒（例 294）
+    - もし 4.9 くらい：分（例 4.9分 -> 294秒）
+    - もし 0.08 くらい：時間（例 0.0817時間 -> 294秒）
+    """
+    # list化
+    try:
+        arr = [None if v is None else float(v) for v in values]
+    except Exception:
+        return values  # 触れない
+
+    nums = [v for v in arr if v is not None]
+    if not nums:
+        return values
+
+    mx = max(nums)
+
+    # ざっくりヒューリスティック
+    # 0 < mx < 1 なら「時間（h）」っぽい（0.08h = 4.8min = 288sec）
+    if 0 < mx < 1.0:
+        return [None if v is None else v * 3600.0 for v in arr]
+
+    # 1 <= mx < 30 なら「分」っぽい（1500m/3000mで 4〜15分レンジ）
+    if 1.0 <= mx < 30.0:
+        return [None if v is None else v * 60.0 for v in arr]
+
+    # それ以外は秒として扱う
+    return arr
+
+
 # =========================================================
 # P2: フィジカル（身長・体重・BMI）
 # =========================================================
@@ -154,7 +174,7 @@ def fig_physical_height_weight_bmi(report, show_roadmap: bool = True):
 
     fig, ax1 = plt.subplots(figsize=(8, 4))
     ax2 = ax1.twinx()
-    ax1.right_ax = ax2  # util 用
+    ax1.right_ax = ax2
 
     ax1.plot(df["date"], df["height_cm"], label="身長 (cm)")
     ax2.plot(df["date"], df["weight_kg"], label="体重 (kg)")
@@ -180,10 +200,7 @@ def fig_physical_height_weight_bmi(report, show_roadmap: bool = True):
             if w_last is not None:
                 _annotate_latest(ax2, x_last, w_last, f"{float(w_last):.1f}kg")
             if b_last is not None:
-                try:
-                    _annotate_latest(ax2, x_last, b_last, f"{float(b_last):.2f}")
-                except Exception:
-                    pass
+                _annotate_latest(ax2, x_last, b_last, f"{float(b_last):.2f}")
     except Exception:
         pass
 
@@ -203,10 +220,6 @@ def fig_run_metric(
     show_roadmap: bool = True,
     mmss: bool = False,
 ):
-    """
-    metric: df列名（例 run_100m_sec / run_1500m_sec / run_3000m_sec）
-    mmss: True のとき、y軸表示を mm:ss（※値は秒のまま）
-    """
     _require_mpl()
     _apply_japanese_font()
 
@@ -214,7 +227,15 @@ def fig_run_metric(
     period = _period_str(df)
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(df["date"], df[metric], marker="o")
+
+    # ★ ここが重要：mmss のときは「秒に正規化」してから描く
+    y_raw = df[metric].tolist()
+    if mmss:
+        y = _normalize_time_to_seconds(y_raw)
+    else:
+        y = y_raw
+
+    ax.plot(df["date"], y, marker="o")
 
     # タイトル（期間付き）
     if period:
@@ -231,11 +252,11 @@ def fig_run_metric(
 
     ax.grid(True, axis="y", alpha=0.3)
 
-    # 最新値注釈（最後の点）
+    # 最新値注釈
     try:
-        if not df.empty:
+        if len(y) > 0 and not df.empty:
             x_last = df["date"].iloc[-1]
-            y_last = df[metric].iloc[-1]
+            y_last = y[-1]
             if mmss:
                 t = _sec_to_mmss_str(y_last)
                 if t:
@@ -262,8 +283,8 @@ def fig_academic_position(report, show_roadmap: bool = True):
     ax2 = ax1.twinx()
     ax1.right_ax = ax2
 
-    ax1.plot(df["date"], df["rank"], label="学年順位", linestyle="-", marker="o")
-    ax2.plot(df["date"], df["deviation"], label="偏差値", linestyle="-", marker="o")
+    ax1.plot(df["date"], df["rank"], label="学年順位", marker="o")
+    ax2.plot(df["date"], df["deviation"], label="偏差値", marker="o")
 
     title = "学業推移（順位・偏差値）"
     if period:
@@ -326,11 +347,10 @@ def fig_academic_scores_rating(report, show_roadmap: bool = True):
 
     # 最新値注釈（評点のみ）
     try:
-        if not df.empty:
+        if not df.empty and "rating" in df.columns:
             x_last = df["date"].iloc[-1]
-            y_last = df["rating"].iloc[-1] if "rating" in df.columns else None
-            if y_last is not None:
-                _annotate_latest(ax1, x_last, y_last, f"{float(y_last):.1f}")
+            y_last = df["rating"].iloc[-1]
+            _annotate_latest(ax1, x_last, y_last, f"{float(y_last):.1f}")
     except Exception:
         pass
 
