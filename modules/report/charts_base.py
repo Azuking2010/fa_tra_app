@@ -1,342 +1,220 @@
 # modules/report/chart_base.py
 from __future__ import annotations
 
-import os
-import colorsys
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from pathlib import Path
+from typing import Optional, Tuple, Any, List
 
 try:
     import matplotlib.pyplot as plt
-    import matplotlib.ticker as mticker
-    from matplotlib.ticker import FuncFormatter
     from matplotlib import font_manager
-    from matplotlib.colors import to_rgb
+    from matplotlib.ticker import MultipleLocator, FuncFormatter
     HAS_MPL = True
 except Exception:
     plt = None
     HAS_MPL = False
 
-from .chart_config import BASE_COLORS, ROADMAP_SHADE, ROADMAP_STYLE, ChartSpec, SeriesSpec
+from .chart_config import AxisSpec, SeriesSpec, ChartSpec
 
 
-def _require_mpl():
+def require_mpl():
     if not HAS_MPL:
         raise ModuleNotFoundError("matplotlib is required for report charts, but it is not installed.")
 
 
-# =========================================================
-# フォント（Noto Sans JPを優先）
-# - Streamlit Cloud / Local どちらでも動くように
-# =========================================================
-def setup_japanese_font(
-    font_path_candidates: Optional[List[str]] = None,
-    prefer_family: str = "Noto Sans JP",
-) -> None:
+# =========================================
+# Font (MUST run before any figure is created)
+# =========================================
+_FONT_INITIALIZED = False
+
+def init_japanese_font(font_dir: Optional[str | Path] = None):
     """
-    - font_path_candidates: TTFの候補パス一覧（存在するものを使う）
-    - prefer_family: フォールバックとして設定するfont family名
+    Ensures Japanese font is available both locally and on Streamlit Cloud.
+    - If font_dir is None, we use repo-relative: assets/fonts/Noto_Sans_JP
     """
-    _require_mpl()
+    global _FONT_INITIALIZED
+    if _FONT_INITIALIZED:
+        return
+    require_mpl()
 
-    # デフォルト候補（あなたの配置に寄せる）
-    candidates = font_path_candidates or [
-        # repoルート基準（Streamlit Cloud）
-        os.path.join("assets", "fonts", "Noto_Sans_JP", "static", "NotoSansJP-Regular.ttf"),
-        os.path.join("assets", "fonts", "NotoSansJP-VariableFont_wght.ttf"),
-        # Windows ローカル例（ユーザー提示の場所）
-        os.path.join("D:\\", "fa_tra_app", "assets", "fonts", "Noto_Sans_JP", "static", "NotoSansJP-Regular.ttf"),
-    ]
+    if font_dir is None:
+        # modules/report/chart_base.py -> project_root/assets/fonts/Noto_Sans_JP
+        project_root = Path(__file__).resolve().parents[2]
+        font_dir = project_root / "assets" / "fonts" / "Noto_Sans_JP"
 
-    for p in candidates:
-        try:
-            if p and os.path.exists(p):
-                font_manager.fontManager.addfont(p)
-                fam = font_manager.FontProperties(fname=p).get_name()
-                plt.rcParams["font.family"] = fam
-                plt.rcParams["axes.unicode_minus"] = False
-                return
-        except Exception:
-            continue
+    font_dir = Path(font_dir)
+    # Pick a .ttf
+    candidates = []
+    if font_dir.exists():
+        candidates += list(font_dir.glob("*.ttf"))
+        candidates += list(font_dir.glob("**/*.ttf"))
 
-    # ファイルが見つからない場合はfamily名だけ指定（環境依存）
-    plt.rcParams["font.family"] = prefer_family
-    plt.rcParams["axes.unicode_minus"] = False
+    if candidates:
+        # Add all fonts to be safe (VariableFont included)
+        for fp in candidates:
+            try:
+                font_manager.fontManager.addfont(str(fp))
+            except Exception:
+                pass
+
+        # Prefer Noto Sans JP family name
+        plt.rcParams["font.family"] = "Noto Sans JP"
+        plt.rcParams["axes.unicode_minus"] = False
+
+    _FONT_INITIALIZED = True
 
 
-# =========================================================
-# ユーティリティ
-# =========================================================
-def mmss_from_seconds(sec: float) -> str:
-    if sec is None:
-        return ""
-    try:
-        sec_i = int(round(float(sec)))
-    except Exception:
-        return ""
-    m = sec_i // 60
-    s = sec_i % 60
+# =========================================
+# Formatters
+# =========================================
+def sec_to_mmss(sec: float) -> str:
+    sec_int = int(round(sec))
+    m = sec_int // 60
+    s = sec_int % 60
     return f"{m}:{s:02d}"
 
 
-def mmss_formatter():
-    def _fmt(y, _pos):
-        return mmss_from_seconds(y)
-    return FuncFormatter(_fmt)
+def make_mmss_formatter():
+    return FuncFormatter(lambda x, pos: sec_to_mmss(x))
 
 
-def _ticks_from_range(ymin: float, ymax: float, step: float) -> List[float]:
-    # ymin > ymax（逆向き）も普通に作れるように
-    ticks: List[float] = []
-    if step <= 0:
-        return ticks
-
-    if ymin <= ymax:
-        v = ymin
-        while v <= ymax + 1e-9:
-            ticks.append(round(v, 10))
-            v += step
-    else:
-        v = ymin
-        while v >= ymax - 1e-9:
-            ticks.append(round(v, 10))
-            v -= step
-    return ticks
-
-
-def _color_to_rgb(color: str) -> Tuple[float, float, float]:
-    return to_rgb(color)
-
-
-def _shade_color(color: str, factor: float) -> Tuple[float, float, float]:
-    """
-    factor:
-      1.0 そのまま
-      <1.0 暗い
-      >1.0 明るい（上限1.0でクリップ）
-    """
-    r, g, b = _color_to_rgb(color)
-    h, s, v = colorsys.rgb_to_hsv(r, g, b)
-    v2 = max(0.0, min(1.0, v * factor))
-    r2, g2, b2 = colorsys.hsv_to_rgb(h, s, v2)
-    return (r2, g2, b2)
-
-
-def _annotate_last(ax, x_last, y_last, text: str):
-    # 右端で見切れにくいように少し左に寄せる
-    ax.annotate(
-        text,
-        xy=(x_last, y_last),
-        xytext=(6, 0),
-        textcoords="offset points",
-        va="center",
-        fontsize=9,
-        alpha=0.9,
-    )
-
-
-def _period_text(df, x_col: str) -> str:
-    if df is None or len(df) == 0 or x_col not in df.columns:
-        return ""
-    x0 = df[x_col].min()
-    x1 = df[x_col].max()
-    try:
-        return f"{x0} ～ {x1}"
-    except Exception:
-        return ""
-
-
-# =========================================================
-# ROADMAP overlay（可能なら描画）
-# - report側の構造が不明なので「取れたら描く」方式で安全に。
-# =========================================================
-def try_draw_roadmap_bands(
-    ax,
-    report: Any,
-    chart_id: str,
-    x_values: List[Any],
-    base_color: str,
+# =========================================
+# Base chart builder
+# =========================================
+def build_line_chart(
+    df,
+    spec: ChartSpec,
+    period_text: Optional[str] = None,
+    show_latest_annotation: bool = True,
 ):
     """
-    想定：
-      report.roadmap は dict または DataFrame 的なもの
-      chart_id と metric が紐づいて low/mid/high が取れる場合に線を引く
-    取れない場合は何もしない（アプリを壊さない）
+    Pure chart builder:
+    - reads spec
+    - draws left axis series and optional right axis series
+    - applies axis range, ticks, inversion, labels, title (with period)
     """
-    if report is None:
-        return
-
-    # 1) dict形式の想定例：report.roadmap.get(chart_id) -> {"low":..,"mid":..,"high":..}
-    roadmap = getattr(report, "roadmap", None)
-    if roadmap is None:
-        return
-
-    try:
-        item = roadmap.get(chart_id) if hasattr(roadmap, "get") else None
-        if not isinstance(item, dict):
-            return
-        for level in ["low", "mid", "high"]:
-            if level not in item:
-                continue
-            y = item[level]
-            c = _shade_color(base_color, ROADMAP_SHADE[level])
-            ax.plot(
-                x_values,
-                [y] * len(x_values),
-                color=c,
-                **ROADMAP_STYLE,
-            )
-    except Exception:
-        return
-
-
-# =========================================================
-# ベース：単軸/双軸 折れ線グラフ
-# =========================================================
-def make_line_chart_single_axis(report: Any, df, spec: ChartSpec, show_roadmap: bool = True):
-    _require_mpl()
-
-    x_col = spec.x_col
-    if df is None or len(df) == 0:
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.set_title(spec.title)
-        ax.text(0.5, 0.5, "データがありません", ha="center", va="center")
-        ax.axis("off")
-        return fig
-
-    fig, ax = plt.subplots(figsize=(8, 4))
-    x = df[x_col].tolist()
-
-    # 期間をタイトルに2行で表示
-    period = _period_text(df, x_col)
-    title = spec.title if not period else f"{spec.title}\n{period}"
-    ax.set_title(title)
-    ax.grid(True, axis="y", alpha=0.3)
-
-    # 軸設定
-    ax.set_ylabel(spec.left_axis.label)
-    ax.set_ylim(spec.left_axis.ymin, spec.left_axis.ymax)
-    ticks = _ticks_from_range(spec.left_axis.ymin, spec.left_axis.ymax, spec.left_axis.step)
-    if ticks:
-        ax.set_yticks(ticks)
-
-    if spec.y_mmss:
-        ax.yaxis.set_major_formatter(mmss_formatter())
-
-    # series
-    for s in spec.series_left:
-        if s.col not in df.columns:
-            continue
-        y = df[s.col].tolist()
-        color = BASE_COLORS.get(s.color_key, "tab:blue")
-        ax.plot(
-            x, y,
-            label=s.label,
-            color=color,
-            linestyle=s.linestyle,
-            linewidth=s.linewidth,
-            marker=s.marker,
-        )
-
-        # 最新値注釈
-        if spec.annotate_last and len(x) > 0:
-            x_last = x[-1]
-            y_last = y[-1]
-            text = mmss_from_seconds(y_last) if spec.y_mmss else f"{y_last:g}"
-            _annotate_last(ax, x_last, y_last, text)
-
-        # ROADMAP（最初の系列の色を基準に）
-        if show_roadmap:
-            try_draw_roadmap_bands(ax, report, spec.chart_id, x, color)
-
-    ax.legend(loc="upper right")
-    return fig
-
-
-def make_line_chart_dual_axis(report: Any, df, spec: ChartSpec, show_roadmap: bool = True):
-    _require_mpl()
-
-    x_col = spec.x_col
-    if df is None or len(df) == 0:
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.set_title(spec.title)
-        ax.text(0.5, 0.5, "データがありません", ha="center", va="center")
-        ax.axis("off")
-        return fig
+    require_mpl()
+    init_japanese_font()  # <<== ここが重要：分割しても毎回必ず先に当たる
 
     fig, ax1 = plt.subplots(figsize=(8, 4))
-    ax2 = ax1.twinx()
-    x = df[x_col].tolist()
+    ax2 = None
 
-    period = _period_text(df, x_col)
-    title = spec.title if not period else f"{spec.title}\n{period}"
+    x = df[spec.x]
+
+    # left axis
+    if spec.left_series:
+        for s in spec.left_series:
+            if s.key in df.columns:
+                ax1.plot(
+                    x, df[s.key],
+                    label=s.label,
+                    color=s.color,
+                    linewidth=s.linewidth,
+                    marker=s.marker,
+                )
+
+    # right axis
+    if spec.right_axis and spec.right_series:
+        ax2 = ax1.twinx()
+        for s in spec.right_series:
+            if s.key in df.columns:
+                ax2.plot(
+                    x, df[s.key],
+                    label=s.label,
+                    color=s.color,
+                    linewidth=s.linewidth,
+                    marker=s.marker,
+                )
+
+    # title
+    title = spec.title
+    if period_text:
+        title = f"{title}\n{period_text}"
     ax1.set_title(title)
 
+    # axis labels
+    if spec.left_series and len(spec.left_series) == 1:
+        ax1.set_ylabel(spec.left_series[0].label)
+    else:
+        ax1.set_ylabel("")
+
+    if ax2 is not None:
+        if spec.right_series and len(spec.right_series) == 1:
+            ax2.set_ylabel(spec.right_series[0].label)
+        else:
+            ax2.set_ylabel("")
+
+    # grid
     ax1.grid(True, axis="y", alpha=0.3)
 
-    # 左軸
-    ax1.set_ylabel(spec.left_axis.label)
-    ax1.set_ylim(spec.left_axis.ymin, spec.left_axis.ymax)
-    ticks1 = _ticks_from_range(spec.left_axis.ymin, spec.left_axis.ymax, spec.left_axis.step)
-    if ticks1:
-        ax1.set_yticks(ticks1)
+    # ranges & ticks (left)
+    apply_axis_spec(ax1, spec.left_axis, mmss=(spec.y_format == "mmss"))
 
-    # 右軸
-    if spec.right_axis is not None:
-        ax2.set_ylabel(spec.right_axis.label)
-        ax2.set_ylim(spec.right_axis.ymin, spec.right_axis.ymax)
-        ticks2 = _ticks_from_range(spec.right_axis.ymin, spec.right_axis.ymax, spec.right_axis.step)
-        if ticks2:
-            ax2.set_yticks(ticks2)
+    # ranges & ticks (right)
+    if ax2 is not None and spec.right_axis is not None:
+        apply_axis_spec(ax2, spec.right_axis, mmss=False)
 
-    # 左系列
-    for s in spec.series_left:
-        if s.col not in df.columns:
-            continue
-        y = df[s.col].tolist()
-        color = BASE_COLORS.get(s.color_key, "tab:blue")
-        ax1.plot(
-            x, y,
-            label=s.label,
-            color=color,
-            linestyle=s.linestyle,
-            linewidth=s.linewidth,
-            marker=s.marker,
-        )
-
-        if spec.annotate_last and len(x) > 0:
-            x_last = x[-1]
-            y_last = y[-1]
-            text = mmss_from_seconds(y_last) if spec.y_mmss else f"{y_last:g}"
-            _annotate_last(ax1, x_last, y_last, text)
-
-        if show_roadmap:
-            try_draw_roadmap_bands(ax1, report, spec.chart_id, x, color)
-
-    # 右系列
-    if spec.series_right:
-        for s in spec.series_right:
-            if s.col not in df.columns:
-                continue
-            y = df[s.col].tolist()
-            color = BASE_COLORS.get(s.color_key, "tab:orange")
-            ax2.plot(
-                x, y,
-                label=s.label,
-                color=color,
-                linestyle=s.linestyle,
-                linewidth=s.linewidth,
-                marker=s.marker,
-            )
-
-            if spec.annotate_last and len(x) > 0:
-                x_last = x[-1]
-                y_last = y[-1]
-                text = mmss_from_seconds(y_last) if spec.y_mmss else f"{y_last:g}"
-                _annotate_last(ax2, x_last, y_last, text)
-
-    # 凡例（左右分け）
+    # legends
     ax1.legend(loc="upper left")
-    ax2.legend(loc="upper right", fontsize=8)
+    if ax2 is not None:
+        ax2.legend(loc="upper right", fontsize=8)
+
+    # latest annotation (last non-null)
+    if show_latest_annotation:
+        annotate_latest(ax1, df, spec.left_series, fmt=("mmss" if spec.y_format == "mmss" else None))
+        if ax2 is not None:
+            annotate_latest(ax2, df, spec.right_series, fmt=None)
 
     return fig
+
+
+def apply_axis_spec(ax, axis_spec: AxisSpec, mmss: bool = False):
+    ax.set_ylim(axis_spec.ymin, axis_spec.ymax)
+
+    # invert means "smaller is better": make y-axis reversed
+    # (Note: if ymin>ymax already, matplotlib is reversed; but we keep it explicit)
+    if axis_spec.invert and axis_spec.ymin < axis_spec.ymax:
+        ax.invert_yaxis()
+
+    # ticks
+    ax.yaxis.set_major_locator(MultipleLocator(axis_spec.major))
+    if axis_spec.minor:
+        ax.yaxis.set_minor_locator(MultipleLocator(axis_spec.minor))
+
+    # mm:ss formatter (for 1500/3000)
+    if mmss:
+        ax.yaxis.set_major_formatter(make_mmss_formatter())
+
+
+def annotate_latest(ax, df, series_list: Optional[List[SeriesSpec]], fmt: Optional[str] = None):
+    if not series_list:
+        return
+    x = df["date"]
+    for s in series_list:
+        if s.key not in df.columns:
+            continue
+        y = df[s.key]
+        # find last valid
+        last_idx = y.last_valid_index()
+        if last_idx is None:
+            continue
+        x_last = df.loc[last_idx, "date"]
+        y_last = df.loc[last_idx, s.key]
+
+        if fmt == "mmss":
+            text = sec_to_mmss(float(y_last))
+        else:
+            # numeric
+            try:
+                text = f"{float(y_last):.1f}"
+            except Exception:
+                text = str(y_last)
+
+        ax.annotate(
+            text,
+            xy=(x_last, y_last),
+            xytext=(6, 0),
+            textcoords="offset points",
+            ha="left",
+            va="center",
+            fontsize=9,
+        )
