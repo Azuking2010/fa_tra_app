@@ -16,6 +16,12 @@ from .charts_definitions import (
     fig_academic_position as _fig_academic_position,
     fig_academic_scores_rating as _fig_academic_scores_rating,
 )
+from pathlib import Path
+from .charts_base import apply_jp_font
+
+# ここで確実に日本語フォントを適用（import時に毎回）
+_FONT_PATH = Path(__file__).resolve().parents[2] / "assets" / "fonts" / "NotoSansJP-VariableFont_wght.ttf"
+apply_jp_font(str(_FONT_PATH))
 
 
 def _require_mpl():
