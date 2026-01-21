@@ -1,29 +1,17 @@
 # modules/report/charts_templates.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
-
 import pandas as pd
 
 from .chart_base import build_line_chart
-from .charts_definitions import ChartSpec
+from .charts_definitions import CHARTS
 
 
-def build_from_spec(
+def build_from_key(
     df: pd.DataFrame,
-    spec: ChartSpec,
-    *,
-    date_col: str = "date",
-    period_text: str = "",
-    roadmap: Optional[Dict[str, Any]] = None,
+    key: str,
+    period_text: str | None = None,
+    roadmap_df: pd.DataFrame | None = None,
 ):
-    """
-    Thin wrapper to keep older call sites stable.
-    """
-    return build_line_chart(
-        df=df,
-        spec=spec,
-        date_col=date_col,
-        period_text=period_text,
-        roadmap=roadmap,
-    )
+    spec = CHARTS[key]
+    return build_line_chart(df, spec, period_text=period_text, roadmap_df=roadmap_df)

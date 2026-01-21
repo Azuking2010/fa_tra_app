@@ -1,248 +1,209 @@
 # modules/report/chart_config.py
-"""
-Chart config (axis ranges, ticks, colors, roadmap styles).
-
-This module should contain only plain data definitions.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional, Tuple, Dict, List
 
 
 # -----------------------------
-# Palette (base colors)
+# Color utilities
 # -----------------------------
-# You said: "色は提案してくれたカラーでOK"
-# -> Here we define 6 base colors (RGB tuples).
-BASE_COLORS: List[Tuple[int, int, int]] = [
-    (31, 119, 180),   # 1: blue
-    (255, 127, 14),   # 2: orange
-    (44, 160, 44),    # 3: green
-    (214, 39, 40),    # 4: red
-    (148, 103, 189),  # 5: purple
-    (140, 86, 75),    # 6: brown
-]
-
-
-def rgb01(rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
-    return (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
-
-
-def adjust_brightness(rgb: Tuple[int, int, int], factor: float) -> Tuple[int, int, int]:
-    """
-    factor > 1.0 => brighter, factor < 1.0 => darker
-    """
-    r, g, b = rgb
-    r = max(0, min(255, int(r * factor)))
-    g = max(0, min(255, int(g * factor)))
-    b = max(0, min(255, int(b * factor)))
+def hex_to_rgb01(hex_color: str) -> Tuple[float, float, float]:
+    h = hex_color.lstrip("#")
+    r = int(h[0:2], 16) / 255.0
+    g = int(h[2:4], 16) / 255.0
+    b = int(h[4:6], 16) / 255.0
     return (r, g, b)
 
 
+def clamp01(x: float) -> float:
+    return max(0.0, min(1.0, x))
+
+
+def lighten(rgb: Tuple[float, float, float], amount: float = 0.18) -> Tuple[float, float, float]:
+    # amount: 0..1
+    r, g, b = rgb
+    return (clamp01(r + (1 - r) * amount), clamp01(g + (1 - g) * amount), clamp01(b + (1 - b) * amount))
+
+
+def darken(rgb: Tuple[float, float, float], amount: float = 0.18) -> Tuple[float, float, float]:
+    r, g, b = rgb
+    return (clamp01(r * (1 - amount)), clamp01(g * (1 - amount)), clamp01(b * (1 - amount)))
+
+
 # -----------------------------
-# Spec data structures
+# Palette (6 colors)
+# ※「提案したカラーでOK」とのことなので、安定して見やすいTableau系を採用
 # -----------------------------
-@dataclass(frozen=True)
-class SeriesSpec:
-    key: str
-    label: str
-    color: Tuple[int, int, int]
-    linewidth: float = 2.5
+PALETTE_HEX: List[str] = [
+    "#1f77b4",  # 1: blue
+    "#ff7f0e",  # 2: orange
+    "#2ca02c",  # 3: green
+    "#d62728",  # 4: red
+    "#9467bd",  # 5: purple
+    "#8c564b",  # 6: brown
+]
+
+PALETTE_RGB01: List[Tuple[float, float, float]] = [hex_to_rgb01(h) for h in PALETTE_HEX]
 
 
 @dataclass(frozen=True)
 class AxisSpec:
     label: str
-    ylim: Tuple[float, float]
-    major: float
-    minor: float
+    vmin: float
+    vmax: float
+    major_step: float
+    minor_step: Optional[float] = None
     invert: bool = False
-    mmss: bool = False  # for seconds->mm:ss formatting
+    value_format: str = "plain"  # plain | sec_float | mmss | int
 
 
 @dataclass(frozen=True)
-class RoadmapStyle:
-    linewidth: float = 1.3
-    linestyle: str = "--"  # thin dashed
-    # low/mid/high brightness factors
-    low_factor: float = 0.85
-    mid_factor: float = 1.00
-    high_factor: float = 1.15
+class RoadmapSpec:
+    enabled: bool = True
+    # low/mid/high are drawn as dashed thin lines
+    linestyle: str = (0, (3, 3))  # dashed
+    linewidth: float = 1.1
+    alpha: float = 0.55
+
+
+@dataclass(frozen=True)
+class LineStyle:
+    color: Tuple[float, float, float]
+    linewidth: float = 2.4
+    marker: str = "o"
+    markersize: float = 5.0
 
 
 @dataclass(frozen=True)
 class ChartSpec:
     title: str
-    x_label: str
     date_col: str
+
+    # left axis
     left_axis: AxisSpec
-    right_axis: Optional[AxisSpec]
-    left_series: List[SeriesSpec]
-    right_series: List[SeriesSpec]
-    roadmap_base_color: Tuple[int, int, int] = BASE_COLORS[0]
-    roadmap_style: RoadmapStyle = RoadmapStyle()
+    left_cols: Tuple[str, ...]
+    left_labels: Tuple[str, ...]
+
+    # right axis (optional)
+    right_axis: Optional[AxisSpec] = None
+    right_cols: Tuple[str, ...] = ()
+    right_labels: Tuple[str, ...] = ()
+
+    # styling
+    palette_index_left: Tuple[int, ...] = (0,)  # indexes into PALETTE_RGB01
+    palette_index_right: Tuple[int, ...] = (1,)
+    roadmap: Optional[RoadmapSpec] = None
+
+    # roadmap columns mapping (low/mid/high)
+    roadmap_cols: Optional[Dict[str, Tuple[str, str, str]]] = None
+    # roadmap is drawn on left axis by default (same scale)
 
 
 # -----------------------------
-# Chart specifications
+# Fixed ranges (あなたがFIXした仕様)
 # -----------------------------
-CHARTS: Dict[str, ChartSpec] = {
-    # Physical: Height (left) + Weight (right), BMI removed for now.
-    "physical_height_weight": ChartSpec(
+CHART_SPECS: Dict[str, ChartSpec] = {
+    # 身長/体重（BMIは当面無し）
+    "height_weight": ChartSpec(
         title="フィジカル推移（身長・体重）",
-        x_label="",
         date_col="date",
-        left_axis=AxisSpec(
-            label="身長 (cm)",
-            ylim=(160.0, 190.0),
-            major=2.0,
-            minor=2.0,
-            invert=False,
-            mmss=False,
-        ),
-        right_axis=AxisSpec(
-            label="体重 (kg)",
-            ylim=(45.0, 75.0),
-            major=2.0,
-            minor=2.0,
-            invert=False,
-            mmss=False,
-        ),
-        left_series=[
-            SeriesSpec(key="height_cm", label="身長 (cm)", color=BASE_COLORS[0], linewidth=2.8),
-        ],
-        right_series=[
-            SeriesSpec(key="weight_kg", label="体重 (kg)", color=BASE_COLORS[1], linewidth=2.8),
-        ],
-        roadmap_base_color=BASE_COLORS[0],
+        left_axis=AxisSpec(label="身長 (cm)", vmin=160.0, vmax=190.0, major_step=2.0, minor_step=2.0, invert=False, value_format="plain"),
+        left_cols=("height_cm",),
+        left_labels=("身長 (cm)",),
+        right_axis=AxisSpec(label="体重 (kg)", vmin=45.0, vmax=75.0, major_step=2.0, minor_step=2.0, invert=False, value_format="plain"),
+        right_cols=("weight_kg",),
+        right_labels=("体重 (kg)",),
+        palette_index_left=(0,),
+        palette_index_right=(1,),
+        roadmap=RoadmapSpec(enabled=True),
+        roadmap_cols={
+            "height_cm": ("height_cm_low", "height_cm_mid", "height_cm_high"),
+            "weight_kg": ("weight_kg_low", "weight_kg_mid", "weight_kg_high"),
+        },
     ),
 
-    # Run: 50m (stored as run_100m_sec for compatibility)
+    # 50m（速いほど上 → invert=True, 範囲は 9.0~5.0）
     "run_50m": ChartSpec(
-        title="Run: 50m (stored as run_100m_sec)",
-        x_label="",
+        title="Run: 50m",
         date_col="date",
-        left_axis=AxisSpec(
-            label="タイム (秒)",
-            ylim=(9.0, 5.0),     # reversed: faster is higher
-            major=0.5,
-            minor=0.25,          # you requested 0.25
-            invert=True,
-            mmss=False,
-        ),
-        right_axis=None,
-        left_series=[
-            SeriesSpec(key="run_100m_sec", label="50m (秒)", color=BASE_COLORS[0], linewidth=2.8),
-        ],
-        right_series=[],
-        roadmap_base_color=BASE_COLORS[0],
+        left_axis=AxisSpec(label="タイム (秒)", vmin=9.0, vmax=5.0, major_step=0.5, minor_step=0.25, invert=True, value_format="sec_float"),
+        left_cols=("run_100m_sec",),  # 既存列名を流用（あなたの現行仕様）
+        left_labels=("50m",),
+        palette_index_left=(0,),
+        roadmap=RoadmapSpec(enabled=True),
+        roadmap_cols={
+            "run_100m_sec": ("run_100m_sec_low", "run_100m_sec_mid", "run_100m_sec_high"),
+        },
     ),
 
-    # Run: 1500m (mm:ss)
+    # 1500m（5:00~4:00, 補助10sec）
     "run_1500m": ChartSpec(
         title="Run: 1500m",
-        x_label="",
         date_col="date",
-        left_axis=AxisSpec(
-            label="タイム (分:秒)",
-            ylim=(5 * 60 + 0, 4 * 60 + 0),  # 5:00 ~ 4:00
-            major=10.0,
-            minor=10.0,
-            invert=True,
-            mmss=True,
-        ),
-        right_axis=None,
-        left_series=[
-            SeriesSpec(key="run_1500m_sec", label="1500m", color=BASE_COLORS[2], linewidth=2.8),
-        ],
-        right_series=[],
-        roadmap_base_color=BASE_COLORS[2],
+        left_axis=AxisSpec(label="タイム (分:秒)", vmin=300.0, vmax=240.0, major_step=10.0, minor_step=10.0, invert=True, value_format="mmss"),
+        left_cols=("run_1500m_sec",),
+        left_labels=("1500m",),
+        palette_index_left=(0,),
+        roadmap=RoadmapSpec(enabled=True),
+        roadmap_cols={
+            "run_1500m_sec": ("run_1500m_sec_low", "run_1500m_sec_mid", "run_1500m_sec_high"),
+        },
     ),
 
-    # Run: 3000m (mm:ss)
+    # 3000m（10:30~9:30, 補助10sec）
     "run_3000m": ChartSpec(
         title="Run: 3000m",
-        x_label="",
         date_col="date",
-        left_axis=AxisSpec(
-            label="タイム (分:秒)",
-            ylim=(10 * 60 + 30, 9 * 60 + 30),  # 10:30 ~ 9:30
-            major=10.0,
-            minor=10.0,
-            invert=True,
-            mmss=True,
-        ),
-        right_axis=None,
-        left_series=[
-            SeriesSpec(key="run_3000m_sec", label="3000m", color=BASE_COLORS[3], linewidth=2.8),
-        ],
-        right_series=[],
-        roadmap_base_color=BASE_COLORS[3],
+        left_axis=AxisSpec(label="タイム (分:秒)", vmin=630.0, vmax=570.0, major_step=10.0, minor_step=10.0, invert=True, value_format="mmss"),
+        left_cols=("run_3000m_sec",),
+        left_labels=("3000m",),
+        palette_index_left=(0,),
+        roadmap=RoadmapSpec(enabled=True),
+        roadmap_cols={
+            "run_3000m_sec": ("run_3000m_sec_low", "run_3000m_sec_mid", "run_3000m_sec_high"),
+        },
     ),
 
-    # Academic: rank (left) + deviation (right)
+    # 学年順位 / 偏差値（左：50~0, 右：30~80）
     "academic_rank_dev": ChartSpec(
-        title="学業推移（順位・偏差値）",
-        x_label="",
+        title="学業（順位/偏差値）",
         date_col="date",
-        left_axis=AxisSpec(
-            label="学年順位",
-            ylim=(50.0, 0.0),  # smaller is better -> higher
-            major=5.0,
-            minor=5.0,
-            invert=True,
-            mmss=False,
-        ),
-        right_axis=AxisSpec(
-            label="偏差値",
-            ylim=(30.0, 80.0),
-            major=5.0,
-            minor=5.0,
-            invert=False,
-            mmss=False,
-        ),
-        left_series=[
-            SeriesSpec(key="rank", label="学年順位", color=BASE_COLORS[4], linewidth=2.8),
-        ],
-        right_series=[
-            SeriesSpec(key="deviation", label="偏差値", color=BASE_COLORS[5], linewidth=2.8),
-        ],
-        roadmap_base_color=BASE_COLORS[4],
+        left_axis=AxisSpec(label="学年順位", vmin=50.0, vmax=0.0, major_step=5.0, minor_step=5.0, invert=True, value_format="int"),
+        left_cols=("rank",),
+        left_labels=("学年順位",),
+        right_axis=AxisSpec(label="参考偏差値", vmin=30.0, vmax=80.0, major_step=5.0, minor_step=5.0, invert=False, value_format="plain"),
+        right_cols=("deviation",),
+        right_labels=("偏差値",),
+        palette_index_left=(2,),
+        palette_index_right=(4,),
+        roadmap=RoadmapSpec(enabled=True),
+        roadmap_cols={
+            "rank": ("rank_low", "rank_mid", "rank_high"),
+            "deviation": ("deviation_low", "deviation_mid", "deviation_high"),
+        },
     ),
 
-    # Academic: rating (left) + subject scores (right)
-    "academic_rating_scores": ChartSpec(
-        title="学業推移（評点・教科スコア）",
-        x_label="",
+    # 評点 / 教科スコア（右は5本以上になる想定）
+    "academic_scores": ChartSpec(
+        title="学業（評点/教科スコア）",
         date_col="date",
-        left_axis=AxisSpec(
-            label="評点",
-            ylim=(0.0, 5.0),
-            major=0.5,
-            minor=0.5,
-            invert=False,
-            mmss=False,
-        ),
-        right_axis=AxisSpec(
-            label="教科得点",
-            ylim=(50.0, 100.0),
-            major=10.0,
-            minor=10.0,
-            invert=False,
-            mmss=False,
-        ),
-        left_series=[
-            SeriesSpec(key="rating", label="評点", color=BASE_COLORS[0], linewidth=2.8),
-        ],
-        right_series=[
-            SeriesSpec(key="score_jp", label="国語", color=BASE_COLORS[1], linewidth=2.5),
-            SeriesSpec(key="score_math", label="数学", color=BASE_COLORS[2], linewidth=2.5),
-            SeriesSpec(key="score_eng", label="英語", color=BASE_COLORS[3], linewidth=2.5),
-            SeriesSpec(key="score_sci", label="理科", color=BASE_COLORS[4], linewidth=2.5),
-            SeriesSpec(key="score_soc", label="社会", color=BASE_COLORS[5], linewidth=2.5),
-        ],
-        roadmap_base_color=BASE_COLORS[0],
+        left_axis=AxisSpec(label="評点", vmin=0.0, vmax=5.0, major_step=0.5, minor_step=0.5, invert=False, value_format="plain"),
+        left_cols=("rating",),
+        left_labels=("評点",),
+        right_axis=AxisSpec(label="教科スコア", vmin=50.0, vmax=100.0, major_step=10.0, minor_step=10.0, invert=False, value_format="int"),
+        right_cols=("score_jp", "score_math", "score_en", "score_sci", "score_soc"),
+        right_labels=("国語", "数学", "英語", "理科", "社会"),
+        palette_index_left=(3,),
+        palette_index_right=(0, 1, 2, 4, 5),
+        roadmap=RoadmapSpec(enabled=True),
+        roadmap_cols={
+            "rating": ("rating_low", "rating_mid", "rating_high"),
+            "score_jp": ("score_jp_low", "score_jp_mid", "score_jp_high"),
+            "score_math": ("score_math_low", "score_math_mid", "score_math_high"),
+            "score_en": ("score_en_low", "score_en_mid", "score_en_high"),
+            "score_sci": ("score_sci_low", "score_sci_mid", "score_sci_high"),
+            "score_soc": ("score_soc_low", "score_soc_mid", "score_soc_high"),
+        },
     ),
 }

@@ -3,278 +3,252 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence, List, Tuple, Union
+from typing import Optional, Tuple, Dict
 
-import math
+import pandas as pd
 
-# matplotlib は重いので遅延importしたい
 _MPL_READY = False
 
 
-def require_mpl():
+def require_mpl() -> None:
+    """
+    matplotlib を遅延importし、Noto Sans JP を必ず登録する。
+    Streamlit Cloud（Linux）でも文字化けを再発させないための唯一の入口。
+    """
     global _MPL_READY
     if _MPL_READY:
         return
-    import matplotlib  # noqa
-    import matplotlib.pyplot as plt  # noqa
-    import matplotlib.ticker as mticker  # noqa
-    _MPL_READY = True
 
+    import matplotlib
+    import matplotlib.pyplot as plt  # noqa: F401
+    from matplotlib import font_manager, rcParams
 
-def init_japanese_font():
-    """
-    ✅ 重要：
-    - Streamlit Cloud / ローカル どちらでも assets/fonts を相対で拾う
-    - 毎回呼んでも問題ないように冪等
-    """
-    require_mpl()
-    import matplotlib as mpl
-    from matplotlib import font_manager
-
-    root = Path(__file__).resolve().parents[2]  # .../fa_tra_app
-    font_dir = root / "assets" / "fonts" / "Noto_Sans_JP"
-    font_path = font_dir / "NotoSansJP-VariableFont_wght.ttf"
+    # このファイル: .../fa_tra_app/modules/report/chart_base.py
+    # assets:     .../fa_tra_app/assets/fonts/Noto_Sans_JP/NotoSansJP-VariableFont_wght.ttf
+    app_root = Path(__file__).resolve().parents[2]
+    font_path = app_root / "assets" / "fonts" / "Noto_Sans_JP" / "NotoSansJP-VariableFont_wght.ttf"
 
     if font_path.exists():
         try:
             font_manager.fontManager.addfont(str(font_path))
-            prop = font_manager.FontProperties(fname=str(font_path))
-            mpl.rcParams["font.family"] = prop.get_name()
+            rcParams["font.family"] = ["Noto Sans JP", "DejaVu Sans"]
         except Exception:
-            # フォント登録に失敗しても落とさない（英字で表示継続）
-            pass
+            # 最悪でも豆腐化しないように一般フォントへフォールバック
+            rcParams["font.family"] = ["DejaVu Sans"]
+    else:
+        rcParams["font.family"] = ["DejaVu Sans"]
 
-    # マイナス記号などの文字化け対策
-    mpl.rcParams["axes.unicode_minus"] = False
-
-
-# ---------- Dataclasses ----------
-
-@dataclass(frozen=True)
-class AxisSpec:
-    ymin: float
-    ymax: float
-    major_step: Optional[float] = None
-    minor_step: Optional[float] = None
-    label: Optional[str] = None
+    rcParams["axes.unicode_minus"] = False
+    _MPL_READY = True
 
 
-@dataclass(frozen=True)
-class SeriesSpec:
-    col: str
-    label: str
-    color: str
-    lw: float = 2.4
-    marker: str = "o"
-
-
-@dataclass(frozen=True)
-class RoadmapBandSpec:
-    """
-    low/mid/high を "薄い点線" で重ねる用途
-    """
-    col_low: str
-    col_mid: str
-    col_high: str
-    base_color: str
-    lw: float = 1.2
-    ls: str = (0, (2, 2))  # dotted
-
-
-@dataclass(frozen=True)
-class ChartSpec:
-    title: str
-    left_axis: AxisSpec
-    left_series: Sequence[SeriesSpec]
-
-    right_axis: Optional[AxisSpec] = None
-    right_series: Optional[Sequence[SeriesSpec]] = None
-
-    y_format: str = "num"  # "num" or "mmss"
-    roadmap: Optional[RoadmapBandSpec] = None
-
-
-# ---------- Helpers ----------
-
-def _parse_mmss_to_seconds(v: Union[str, float, int]) -> Optional[float]:
-    """
-    入力値が
-      - "4:54" のような mm:ss
-      - 数値 (minutes) または (seconds)
-    のどちらでも秒に正規化して返す。
-    """
-    if v is None:
-        return None
-
-    if isinstance(v, str):
-        s = v.strip()
-        if not s:
-            return None
-        if ":" in s:
-            parts = s.split(":")
-            if len(parts) != 2:
-                return None
-            try:
-                m = int(parts[0])
-                sec = float(parts[1])
-                return m * 60.0 + sec
-            except ValueError:
-                return None
-        # ":"無し文字列は数値扱いを試す
-        try:
-            v = float(s)
-        except ValueError:
-            return None
-
-    # 数値の場合
+def _sec_to_mmss(sec: float) -> str:
     try:
-        x = float(v)
+        s = int(round(float(sec)))
     except Exception:
-        return None
-
-    # ヒューリスティック：
-    # 50mは 5〜10くらい→秒
-    # 1500mが 4〜6 みたいな値なら "分" で入ってる可能性が高い→秒へ
-    if 0 < x < 60:
-        # 4.9 などが来たら minutes とみなす（1500m/3000m用）
-        # ただし 50m(8.2) みたいなのは seconds の可能性が高いので、
-        # 10以下は seconds 優先
-        if x <= 10.5:
-            return x
-        return x * 60.0
-
-    return x
-
-
-def _coerce_series_seconds(df, cols: Sequence[str]) -> None:
-    """
-    df の指定列を mm:ss → 秒 float に正規化（破壊的）
-    """
-    for c in cols:
-        if c not in df.columns:
-            continue
-        df[c] = df[c].apply(_parse_mmss_to_seconds)
-
-
-def _format_seconds_mmss(x: float) -> str:
-    if x is None or (isinstance(x, float) and (math.isnan(x))):
         return ""
-    x = float(x)
-    m = int(x // 60)
-    s = int(round(x - 60 * m))
-    return f"{m}:{s:02d}"
+    m = s // 60
+    r = s % 60
+    return f"{m}:{r:02d}"
 
 
-def apply_axis_spec(ax, axis_spec: AxisSpec, y_format: str = "num"):
-    require_mpl()
-    import matplotlib.ticker as mticker
-
-    ax.set_ylim(axis_spec.ymin, axis_spec.ymax)
-
-    if axis_spec.label:
-        ax.set_ylabel(axis_spec.label)
-
-    if axis_spec.major_step:
-        ax.yaxis.set_major_locator(mticker.MultipleLocator(axis_spec.major_step))
-    if axis_spec.minor_step:
-        ax.yaxis.set_minor_locator(mticker.MultipleLocator(axis_spec.minor_step))
-        ax.grid(which="minor", alpha=0.15)
-    ax.grid(which="major", alpha=0.25)
-
-    if y_format == "mmss":
-        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, pos: _format_seconds_mmss(v)))
+def _format_value(fmt: str, v: float) -> str:
+    if fmt == "mmss":
+        return _sec_to_mmss(v)
+    if fmt == "sec_float":
+        # 50m用
+        return f"{v:.2f}".rstrip("0").rstrip(".")
+    if fmt == "int":
+        try:
+            return str(int(round(v)))
+        except Exception:
+            return ""
+    return f"{v:g}"
 
 
-def annotate_latest(ax, df, series_list: Sequence[SeriesSpec], y_format: str = "num"):
-    """
-    最終値（最後の非null）を右端に注釈
-    """
-    for s in series_list:
-        if s.col not in df.columns:
-            continue
-        sub = df[["date", s.col]].dropna()
-        if sub.empty:
-            continue
-        last = sub.iloc[-1]
-        y = float(last[s.col])
-        txt = _format_seconds_mmss(y) if y_format == "mmss" else f"{y:g}"
-        ax.annotate(
-            txt,
-            xy=(last["date"], y),
-            xytext=(6, 0),
-            textcoords="offset points",
-            va="center",
-            fontsize=9,
-        )
+def _apply_axis_ticks(ax, vmin: float, vmax: float, major: float, minor: Optional[float], fmt: str):
+    from matplotlib.ticker import MultipleLocator, FuncFormatter
+
+    # locator
+    ax.yaxis.set_major_locator(MultipleLocator(major))
+    if minor is not None:
+        ax.yaxis.set_minor_locator(MultipleLocator(minor))
+
+    # formatter
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: _format_value(fmt, x)))
+
+    # limits
+    ax.set_ylim(vmin, vmax)
+
+    # grid
+    ax.grid(True, which="major", axis="y", alpha=0.25)
+    if minor is not None:
+        ax.grid(True, which="minor", axis="y", alpha=0.12)
 
 
-# ---------- Main builder ----------
+def _safe_series(df: pd.DataFrame, col: str):
+    if col not in df.columns:
+        return None
+    s = pd.to_numeric(df[col], errors="coerce")
+    if s.notna().sum() == 0:
+        return None
+    return s
+
+
+@dataclass(frozen=True)
+class BuiltAxes:
+    fig: object
+    ax_left: object
+    ax_right: Optional[object]
+
 
 def build_line_chart(
-    df,
-    spec: ChartSpec,
+    df: pd.DataFrame,
+    spec,
     period_text: Optional[str] = None,
-    show_latest_annotation: bool = True,
-):
+    roadmap_df: Optional[pd.DataFrame] = None,
+) -> object:
     """
-    - specに従って折れ線グラフを生成
-    - 右軸も対応
-    - mm:ss は内部を「秒」で統一して表示
+    spec: chart_config.ChartSpec
+    df: date_col + series cols
+    roadmap_df: ROADMAP(目標帯)のdf（同じdate_colで揃える）
     """
     require_mpl()
-    init_japanese_font()
-
     import matplotlib.pyplot as plt
 
-    # mm:ss系は df を秒に正規化
-    if spec.y_format == "mmss":
-        cols = [s.col for s in spec.left_series]
-        if spec.right_series:
-            cols += [s.col for s in spec.right_series]
-        _coerce_series_seconds(df, cols)
+    if df is None or df.empty:
+        fig = plt.figure(figsize=(10, 3.4))
+        plt.text(0.5, 0.5, "No data", ha="center", va="center")
+        plt.axis("off")
+        return fig
 
-    fig, ax1 = plt.subplots(figsize=(9.5, 4.8))
+    # date col
+    date_col = spec.date_col
+    if date_col not in df.columns:
+        # 最低限のフォールバック
+        df = df.copy()
+        df[date_col] = range(len(df))
 
-    # title
+    x = pd.to_datetime(df[date_col], errors="coerce")
+    if x.isna().all():
+        # 文字列/数値ならそのまま
+        x = df[date_col]
+
+    fig = plt.figure(figsize=(10, 3.6))
+    ax = fig.add_subplot(111)
+
+    # Title
     title = spec.title
     if period_text:
-        title = f"{title}\n{period_text}"
-    ax1.set_title(title)
+        ax.set_title(f"{title}\n{period_text}", fontsize=11)
+    else:
+        ax.set_title(title, fontsize=11)
 
-    # left axis
-    apply_axis_spec(ax1, spec.left_axis, y_format=spec.y_format)
-    for s in spec.left_series:
-        if s.col in df.columns:
-            ax1.plot(df["date"], df[s.col], label=s.label, color=s.color, linewidth=s.lw, marker=s.marker)
+    # Left axis
+    ax.set_ylabel(spec.left_axis.label)
+    _apply_axis_ticks(
+        ax,
+        spec.left_axis.vmin,
+        spec.left_axis.vmax,
+        spec.left_axis.major_step,
+        spec.left_axis.minor_step,
+        spec.left_axis.value_format,
+    )
 
-    # right axis
+    # plot left lines
+    from .chart_config import PALETTE_RGB01, darken, lighten
+
+    for i, col in enumerate(spec.left_cols):
+        s = _safe_series(df, col)
+        if s is None:
+            continue
+        color = PALETTE_RGB01[spec.palette_index_left[i % len(spec.palette_index_left)]]
+        ax.plot(x, s, color=color, linewidth=2.4, marker="o", markersize=5.0, label=spec.left_labels[i])
+
+        # ROADMAP (low/mid/high)
+        if spec.roadmap and spec.roadmap.enabled and spec.roadmap_cols and col in spec.roadmap_cols:
+            if roadmap_df is not None and not roadmap_df.empty:
+                low_c, mid_c, high_c = spec.roadmap_cols[col]
+                for kind, cfunc, label_suffix in [
+                    ("low", darken, "目標(低)"),
+                    ("mid", lambda c: c, "目標(中)"),
+                    ("high", lighten, "目標(高)"),
+                ]:
+                    rcol = {"low": low_c, "mid": mid_c, "high": high_c}[kind]
+                    rs = _safe_series(roadmap_df, rcol)
+                    if rs is None:
+                        continue
+                    rx = pd.to_datetime(roadmap_df[date_col], errors="coerce")
+                    if rx.isna().all():
+                        rx = roadmap_df[date_col]
+                    ax.plot(
+                        rx,
+                        rs,
+                        color=cfunc(color),
+                        linewidth=spec.roadmap.linewidth,
+                        linestyle=spec.roadmap.linestyle,
+                        alpha=spec.roadmap.alpha,
+                        label=f"{spec.left_labels[i]} {label_suffix}",
+                    )
+
+    # Right axis
     ax2 = None
-    if spec.right_axis and spec.right_series:
-        ax2 = ax1.twinx()
-        apply_axis_spec(ax2, spec.right_axis, y_format="num")  # 右軸は基本num（必要なら拡張）
-        for s in spec.right_series:
-            if s.col in df.columns:
-                ax2.plot(df["date"], df[s.col], label=s.label, color=s.color, linewidth=s.lw, marker=s.marker)
+    if spec.right_axis is not None and len(spec.right_cols) > 0:
+        ax2 = ax.twinx()
+        ax2.set_ylabel(spec.right_axis.label)
+        _apply_axis_ticks(
+            ax2,
+            spec.right_axis.vmin,
+            spec.right_axis.vmax,
+            spec.right_axis.major_step,
+            spec.right_axis.minor_step,
+            spec.right_axis.value_format,
+        )
 
-    # roadmap overlay (low/mid/high)
-    if spec.roadmap is not None:
-        rm = spec.roadmap
-        for col, tone in [(rm.col_low, -0.18), (rm.col_mid, 0.0), (rm.col_high, +0.18)]:
-            if col in df.columns:
-                # tone は chart_config 側で色を作って渡す方が本当は綺麗だけど、
-                # ここでは "base_color" をそのまま使う（見た目差は configで指定）
-                ax1.plot(df["date"], df[col], color=rm.base_color, linewidth=rm.lw, linestyle=rm.ls, alpha=0.6)
+        for i, col in enumerate(spec.right_cols):
+            s = _safe_series(df, col)
+            if s is None:
+                continue
+            color = PALETTE_RGB01[spec.palette_index_right[i % len(spec.palette_index_right)]]
+            ax2.plot(x, s, color=color, linewidth=2.4, marker="o", markersize=5.0, label=spec.right_labels[i])
 
-    # legends
-    ax1.legend(loc="upper left", fontsize=9)
+            # ROADMAP
+            if spec.roadmap and spec.roadmap.enabled and spec.roadmap_cols and col in spec.roadmap_cols:
+                if roadmap_df is not None and not roadmap_df.empty:
+                    low_c, mid_c, high_c = spec.roadmap_cols[col]
+                    for kind, cfunc, label_suffix in [
+                        ("low", darken, "目標(低)"),
+                        ("mid", lambda c: c, "目標(中)"),
+                        ("high", lighten, "目標(高)"),
+                    ]:
+                        rcol = {"low": low_c, "mid": mid_c, "high": high_c}[kind]
+                        rs = _safe_series(roadmap_df, rcol)
+                        if rs is None:
+                            continue
+                        rx = pd.to_datetime(roadmap_df[date_col], errors="coerce")
+                        if rx.isna().all():
+                            rx = roadmap_df[date_col]
+                        ax2.plot(
+                            rx,
+                            rs,
+                            color=cfunc(color),
+                            linewidth=spec.roadmap.linewidth,
+                            linestyle=spec.roadmap.linestyle,
+                            alpha=spec.roadmap.alpha,
+                            label=f"{spec.right_labels[i]} {label_suffix}",
+                        )
+
+    # Legend (merge)
+    handles1, labels1 = ax.get_legend_handles_labels()
     if ax2 is not None:
-        ax2.legend(loc="upper right", fontsize=9)
+        handles2, labels2 = ax2.get_legend_handles_labels()
+        handles = handles1 + handles2
+        labels = labels1 + labels2
+    else:
+        handles, labels = handles1, labels1
 
-    # latest annotation
-    if show_latest_annotation:
-        annotate_latest(ax1, df, spec.left_series, y_format=spec.y_format)
-        if ax2 is not None:
-            annotate_latest(ax2, df, spec.right_series, y_format="num")
+    if handles:
+        ax.legend(handles, labels, loc="upper right", fontsize=9, framealpha=0.85)
 
     fig.tight_layout()
     return fig
