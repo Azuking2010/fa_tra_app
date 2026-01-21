@@ -12,17 +12,23 @@ def _to_datetime_safe(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors="coerce")
 
 
+def _ym_from_dt(dt: pd.Timestamp) -> str:
+    if pd.isna(dt):
+        return ""
+    return f"{dt.year:04d}-{dt.month:02d}"
+
+
 def _month_range_ym(start_date: pd.Timestamp, end_date: pd.Timestamp) -> List[str]:
     # start_date/end_date を含む月リスト（YYYY-MM）
     if pd.isna(start_date) or pd.isna(end_date):
         return []
     start = pd.Timestamp(year=start_date.year, month=start_date.month, day=1)
     end = pd.Timestamp(year=end_date.year, month=end_date.month, day=1)
-    out = []
+    out: List[str] = []
     cur = start
     while cur <= end:
         out.append(f"{cur.year:04d}-{cur.month:02d}")
-        cur = cur + pd.offsets.MonthBegin(1)
+        cur = (cur + pd.offsets.MonthBegin(1))
     return out
 
 
@@ -87,8 +93,10 @@ def build_report_data(
 
     if "date" in df.columns:
         df["_dt"] = _to_datetime_safe(df["date"])
+        df["_ym"] = df["_dt"].apply(_ym_from_dt)
     else:
         df["_dt"] = pd.NaT
+        df["_ym"] = ""
 
     # start/end を Timestamp 化
     s = pd.to_datetime(start_date, errors="coerce")
@@ -131,3 +139,13 @@ def build_report_data(
         roadmap_for_month=roadmap_for_month,
         months=months,
     )
+
+
+# --- 互換：ui_report 側が build_report を呼んでも落ちないようにする ---
+def build_report(
+    portfolio_df: pd.DataFrame,
+    roadmap_df: pd.DataFrame,
+    start_date: Any,
+    end_date: Any,
+) -> ReportData:
+    return build_report_data(portfolio_df, roadmap_df, start_date, end_date)
