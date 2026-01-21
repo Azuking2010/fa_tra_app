@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .charts_base import (
+from .chart_base import (
     require_mpl,
     setup_ax,
     make_period_str,

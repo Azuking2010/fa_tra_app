@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .charts_templates import line_chart_1y, line_chart_2y
-from .charts_base import to_seconds_series
+from .chart_base import to_seconds_series
 
 
 def fig_physical_height_weight_bmi(report, show_roadmap: bool = True):

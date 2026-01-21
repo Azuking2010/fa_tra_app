@@ -2,149 +2,132 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Dict, Optional, Sequence, Tuple
+import colorsys
 
-# =========================================
-# Color helpers
-# =========================================
-def _to_rgb01(c):
-    """Accept 'tab:blue' etc is handled by matplotlib, so here we only handle rgb tuples."""
-    return c
+from .chart_base import AxisSpec, SeriesSpec, ChartSpec, RoadmapBandSpec
 
-def adjust_brightness_rgb(rgb: Tuple[float, float, float], mode: str, factor: float = 0.75):
+
+# -------- Color helpers --------
+
+def hex_to_rgb01(h: str) -> Tuple[float, float, float]:
+    h = h.lstrip("#")
+    return (int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0)
+
+
+def rgb01_to_hex(rgb: Tuple[float, float, float]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(
+        int(max(0, min(1, rgb[0])) * 255),
+        int(max(0, min(1, rgb[1])) * 255),
+        int(max(0, min(1, rgb[2])) * 255),
+    )
+
+
+def shift_lightness(hex_color: str, delta: float) -> str:
     """
-    mode:
-      - "dark":  rgb * factor
-      - "light": 1 - (1-rgb)*factor
+    delta: -0.3〜+0.3 くらいを想定
     """
-    r, g, b = rgb
-    if mode == "dark":
-        return (max(0.0, r * factor), max(0.0, g * factor), max(0.0, b * factor))
-    if mode == "light":
-        return (min(1.0, 1 - (1 - r) * factor), min(1.0, 1 - (1 - g) * factor), min(1.0, 1 - (1 - b) * factor))
-    return rgb
+    r, g, b = hex_to_rgb01(hex_color)
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    l = max(0.0, min(1.0, l + delta))
+    rr, gg, bb = colorsys.hls_to_rgb(h, l, s)
+    return rgb01_to_hex((rr, gg, bb))
 
 
-# =========================================
-# Axis / ticks specs
-# =========================================
-@dataclass(frozen=True)
-class AxisSpec:
-    ymin: float
-    ymax: float
-    major: float
-    minor: Optional[float] = None
-    invert: bool = False  # True = smaller values appear higher (y-axis reversed)
+# -------- Base palette（6色）--------
+# 「提案してくれたカラーでOK」＝標準Tableau系で安定運用
+PALETTE = [
+    "#1f77b4",  # 1: blue
+    "#ff7f0e",  # 2: orange
+    "#2ca02c",  # 3: green
+    "#d62728",  # 4: red
+    "#9467bd",  # 5: purple
+    "#8c564b",  # 6: brown
+]
 
 
-@dataclass(frozen=True)
-class SeriesSpec:
-    key: str               # dataframe column name
-    label: str            # display label
-    color: Any            # matplotlib color (e.g. 'tab:blue' or (r,g,b))
-    linewidth: float = 2.0
-    marker: str = "o"
+def c(i: int) -> str:
+    return PALETTE[i - 1]
 
 
-@dataclass(frozen=True)
-class ChartSpec:
-    chart_id: str
-    title: str
-    x: str
-    left_axis: AxisSpec
-    right_axis: Optional[AxisSpec] = None
-    left_series: Optional[List[SeriesSpec]] = None
-    right_series: Optional[List[SeriesSpec]] = None
-    # value formatting
-    y_format: Optional[str] = None  # "mmss" etc (for left axis only; for run charts)
-    # roadmap overlay settings
-    roadmap_key_prefix: Optional[str] = None  # e.g. "height_cm" -> roadmap columns derived elsewhere
+# -------- Chart specs --------
 
-
-# =========================================
-# Base palette (1〜6)
-# =========================================
-PALETTE = {
-    1: "tab:blue",
-    2: "tab:orange",
-    3: "tab:green",
-    4: "tab:red",
-    5: "tab:purple",
-    6: "tab:brown",
-}
-
-# If you want strict RGB later, replace with tuples:
-# e.g. PALETTE = {1:(0.12,0.47,0.71), ...}
-
-
-# =========================================
-# Chart specs
-# =========================================
 CHARTS: Dict[str, ChartSpec] = {
-    "physical_height_weight": ChartSpec(
-        chart_id="physical_height_weight",
+    # P2 フィジカル（身長/体重） BMIはいったん無し
+    "physical_hw": ChartSpec(
         title="フィジカル推移（身長・体重）",
-        x="date",
-        left_axis=AxisSpec(ymin=160, ymax=190, major=2, minor=2, invert=False),
-        right_axis=AxisSpec(ymin=45, ymax=75, major=2, minor=2, invert=False),
+        left_axis=AxisSpec(ymin=160, ymax=190, major_step=2, minor_step=None, label="身長（cm）"),
         left_series=[
-            SeriesSpec(key="height_cm", label="身長（cm）", color=PALETTE[1]),
+            SeriesSpec(col="height_cm", label="身長（cm）", color=c(1), lw=2.6),
         ],
+        right_axis=AxisSpec(ymin=45, ymax=75, major_step=2, minor_step=None, label="体重（kg）"),
         right_series=[
-            SeriesSpec(key="weight_kg", label="体重（kg）", color=PALETTE[2]),
+            SeriesSpec(col="weight_kg", label="体重（kg）", color=c(2), lw=2.6),
         ],
+        y_format="num",
     ),
 
+    # P2 走力：50m（早いほど上＝9.0→5.0）
     "run_50m": ChartSpec(
-        chart_id="run_50m",
-        title="走力：50m",
-        x="date",
-        left_axis=AxisSpec(ymin=9.0, ymax=5.0, major=0.5, minor=0.25, invert=True),
-        left_series=[SeriesSpec(key="run_50m_sec", label="50m（秒）", color=PALETTE[1])],
-        y_format=None,
-    ),
-
-    "run_1500m": ChartSpec(
-        chart_id="run_1500m",
-        title="走力：1500m",
-        x="date",
-        left_axis=AxisSpec(ymin=5*60, ymax=4*60, major=10, minor=10, invert=True),
-        left_series=[SeriesSpec(key="run_1500m_sec", label="1500m", color=PALETTE[1])],
-        y_format="mmss",
-    ),
-
-    "run_3000m": ChartSpec(
-        chart_id="run_3000m",
-        title="走力：3000m",
-        x="date",
-        left_axis=AxisSpec(ymin=10*60+30, ymax=9*60+30, major=10, minor=10, invert=True),
-        left_series=[SeriesSpec(key="run_3000m_sec", label="3000m", color=PALETTE[1])],
-        y_format="mmss",
-    ),
-
-    "academic_rank_dev": ChartSpec(
-        chart_id="academic_rank_dev",
-        title="学業推移（順位・偏差値）",
-        x="date",
-        left_axis=AxisSpec(ymin=50, ymax=0, major=5, minor=5, invert=True),
-        right_axis=AxisSpec(ymin=30, ymax=80, major=5, minor=5, invert=False),
-        left_series=[SeriesSpec(key="rank", label="学年順位", color=PALETTE[4])],
-        right_series=[SeriesSpec(key="deviation", label="偏差値", color=PALETTE[1])],
-    ),
-
-    "academic_rating_scores": ChartSpec(
-        chart_id="academic_rating_scores",
-        title="学業推移（評点・教科スコア）",
-        x="date",
-        left_axis=AxisSpec(ymin=0, ymax=5, major=0.5, minor=0.5, invert=False),
-        right_axis=AxisSpec(ymin=50, ymax=100, major=10, minor=10, invert=False),
-        left_series=[SeriesSpec(key="rating", label="評点", color="black", linewidth=2.5)],
-        right_series=[
-            SeriesSpec(key="score_jp", label="国語", color=PALETTE[1]),
-            SeriesSpec(key="score_math", label="数学", color=PALETTE[2]),
-            SeriesSpec(key="score_en", label="英語", color=PALETTE[3]),
-            SeriesSpec(key="score_sci", label="理科", color=PALETTE[5]),
-            SeriesSpec(key="score_soc", label="社会", color=PALETTE[6]),
+        title="Run: 50m",
+        left_axis=AxisSpec(ymin=9.0, ymax=5.0, major_step=0.25, minor_step=None, label="タイム（秒）"),
+        left_series=[
+            SeriesSpec(col="run_50m_sec", label="50m（秒）", color=c(1), lw=2.6),
         ],
+        y_format="num",
+    ),
+
+    # P2 走力：1500m（5:00→4:00）補助10sec
+    # 内部は「秒」で扱う（configも秒で定義）
+    "run_1500m": ChartSpec(
+        title="Run: 1500m",
+        left_axis=AxisSpec(ymin=300, ymax=240, major_step=10, minor_step=None, label="タイム（分:秒）"),
+        left_series=[
+            SeriesSpec(col="run_1500m", label="1500m", color=c(1), lw=2.6),
+        ],
+        y_format="mmss",
+    ),
+
+    # P2 走力：3000m（10:30→9:30）補助10sec
+    "run_3000m": ChartSpec(
+        title="Run: 3000m",
+        left_axis=AxisSpec(ymin=630, ymax=570, major_step=10, minor_step=None, label="タイム（分:秒）"),
+        left_series=[
+            SeriesSpec(col="run_3000m", label="3000m", color=c(1), lw=2.6),
+        ],
+        y_format="mmss",
+    ),
+
+    # P3 学業（順位/偏差値）
+    "academic_rank_dev": ChartSpec(
+        title="学業：順位・偏差値",
+        left_axis=AxisSpec(ymin=50, ymax=0, major_step=5, minor_step=None, label="学年順位"),
+        left_series=[
+            SeriesSpec(col="rank_grade", label="学年順位", color=c(4), lw=2.6),
+        ],
+        right_axis=AxisSpec(ymin=30, ymax=80, major_step=5, minor_step=None, label="参考偏差値"),
+        right_series=[
+            SeriesSpec(col="deviation", label="偏差値", color=c(5), lw=2.6),
+        ],
+        y_format="num",
+    ),
+
+    # P3 学業（評点/教科スコア）
+    "academic_scores": ChartSpec(
+        title="学業：評点・教科スコア",
+        left_axis=AxisSpec(ymin=0, ymax=5, major_step=0.5, minor_step=None, label="評点"),
+        left_series=[
+            SeriesSpec(col="rating", label="評点", color=c(3), lw=2.6),
+        ],
+        right_axis=AxisSpec(ymin=50, ymax=100, major_step=10, minor_step=None, label="教科スコア"),
+        right_series=[
+            # 教科は最大5色必要 → 2軸側に複数線
+            SeriesSpec(col="score_jp", label="国語", color=c(1), lw=2.2),
+            SeriesSpec(col="score_math", label="数学", color=c(2), lw=2.2),
+            SeriesSpec(col="score_eng", label="英語", color=c(4), lw=2.2),
+            SeriesSpec(col="score_sci", label="理科", color=c(5), lw=2.2),
+            SeriesSpec(col="score_soc", label="社会", color=c(6), lw=2.2),
+        ],
+        y_format="num",
     ),
 }
