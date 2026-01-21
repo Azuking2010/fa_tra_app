@@ -1,133 +1,248 @@
 # modules/report/chart_config.py
+"""
+Chart config (axis ranges, ticks, colors, roadmap styles).
+
+This module should contain only plain data definitions.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple
-import colorsys
-
-from .chart_base import AxisSpec, SeriesSpec, ChartSpec, RoadmapBandSpec
+from typing import Any, Dict, List, Optional, Tuple
 
 
-# -------- Color helpers --------
-
-def hex_to_rgb01(h: str) -> Tuple[float, float, float]:
-    h = h.lstrip("#")
-    return (int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0)
-
-
-def rgb01_to_hex(rgb: Tuple[float, float, float]) -> str:
-    return "#{:02x}{:02x}{:02x}".format(
-        int(max(0, min(1, rgb[0])) * 255),
-        int(max(0, min(1, rgb[1])) * 255),
-        int(max(0, min(1, rgb[2])) * 255),
-    )
-
-
-def shift_lightness(hex_color: str, delta: float) -> str:
-    """
-    delta: -0.3〜+0.3 くらいを想定
-    """
-    r, g, b = hex_to_rgb01(hex_color)
-    h, l, s = colorsys.rgb_to_hls(r, g, b)
-    l = max(0.0, min(1.0, l + delta))
-    rr, gg, bb = colorsys.hls_to_rgb(h, l, s)
-    return rgb01_to_hex((rr, gg, bb))
-
-
-# -------- Base palette（6色）--------
-# 「提案してくれたカラーでOK」＝標準Tableau系で安定運用
-PALETTE = [
-    "#1f77b4",  # 1: blue
-    "#ff7f0e",  # 2: orange
-    "#2ca02c",  # 3: green
-    "#d62728",  # 4: red
-    "#9467bd",  # 5: purple
-    "#8c564b",  # 6: brown
+# -----------------------------
+# Palette (base colors)
+# -----------------------------
+# You said: "色は提案してくれたカラーでOK"
+# -> Here we define 6 base colors (RGB tuples).
+BASE_COLORS: List[Tuple[int, int, int]] = [
+    (31, 119, 180),   # 1: blue
+    (255, 127, 14),   # 2: orange
+    (44, 160, 44),    # 3: green
+    (214, 39, 40),    # 4: red
+    (148, 103, 189),  # 5: purple
+    (140, 86, 75),    # 6: brown
 ]
 
 
-def c(i: int) -> str:
-    return PALETTE[i - 1]
+def rgb01(rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
+    return (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
 
 
-# -------- Chart specs --------
+def adjust_brightness(rgb: Tuple[int, int, int], factor: float) -> Tuple[int, int, int]:
+    """
+    factor > 1.0 => brighter, factor < 1.0 => darker
+    """
+    r, g, b = rgb
+    r = max(0, min(255, int(r * factor)))
+    g = max(0, min(255, int(g * factor)))
+    b = max(0, min(255, int(b * factor)))
+    return (r, g, b)
 
+
+# -----------------------------
+# Spec data structures
+# -----------------------------
+@dataclass(frozen=True)
+class SeriesSpec:
+    key: str
+    label: str
+    color: Tuple[int, int, int]
+    linewidth: float = 2.5
+
+
+@dataclass(frozen=True)
+class AxisSpec:
+    label: str
+    ylim: Tuple[float, float]
+    major: float
+    minor: float
+    invert: bool = False
+    mmss: bool = False  # for seconds->mm:ss formatting
+
+
+@dataclass(frozen=True)
+class RoadmapStyle:
+    linewidth: float = 1.3
+    linestyle: str = "--"  # thin dashed
+    # low/mid/high brightness factors
+    low_factor: float = 0.85
+    mid_factor: float = 1.00
+    high_factor: float = 1.15
+
+
+@dataclass(frozen=True)
+class ChartSpec:
+    title: str
+    x_label: str
+    date_col: str
+    left_axis: AxisSpec
+    right_axis: Optional[AxisSpec]
+    left_series: List[SeriesSpec]
+    right_series: List[SeriesSpec]
+    roadmap_base_color: Tuple[int, int, int] = BASE_COLORS[0]
+    roadmap_style: RoadmapStyle = RoadmapStyle()
+
+
+# -----------------------------
+# Chart specifications
+# -----------------------------
 CHARTS: Dict[str, ChartSpec] = {
-    # P2 フィジカル（身長/体重） BMIはいったん無し
-    "physical_hw": ChartSpec(
+    # Physical: Height (left) + Weight (right), BMI removed for now.
+    "physical_height_weight": ChartSpec(
         title="フィジカル推移（身長・体重）",
-        left_axis=AxisSpec(ymin=160, ymax=190, major_step=2, minor_step=None, label="身長（cm）"),
+        x_label="",
+        date_col="date",
+        left_axis=AxisSpec(
+            label="身長 (cm)",
+            ylim=(160.0, 190.0),
+            major=2.0,
+            minor=2.0,
+            invert=False,
+            mmss=False,
+        ),
+        right_axis=AxisSpec(
+            label="体重 (kg)",
+            ylim=(45.0, 75.0),
+            major=2.0,
+            minor=2.0,
+            invert=False,
+            mmss=False,
+        ),
         left_series=[
-            SeriesSpec(col="height_cm", label="身長（cm）", color=c(1), lw=2.6),
+            SeriesSpec(key="height_cm", label="身長 (cm)", color=BASE_COLORS[0], linewidth=2.8),
         ],
-        right_axis=AxisSpec(ymin=45, ymax=75, major_step=2, minor_step=None, label="体重（kg）"),
         right_series=[
-            SeriesSpec(col="weight_kg", label="体重（kg）", color=c(2), lw=2.6),
+            SeriesSpec(key="weight_kg", label="体重 (kg)", color=BASE_COLORS[1], linewidth=2.8),
         ],
-        y_format="num",
+        roadmap_base_color=BASE_COLORS[0],
     ),
 
-    # P2 走力：50m（早いほど上＝9.0→5.0）
+    # Run: 50m (stored as run_100m_sec for compatibility)
     "run_50m": ChartSpec(
-        title="Run: 50m",
-        left_axis=AxisSpec(ymin=9.0, ymax=5.0, major_step=0.25, minor_step=None, label="タイム（秒）"),
+        title="Run: 50m (stored as run_100m_sec)",
+        x_label="",
+        date_col="date",
+        left_axis=AxisSpec(
+            label="タイム (秒)",
+            ylim=(9.0, 5.0),     # reversed: faster is higher
+            major=0.5,
+            minor=0.25,          # you requested 0.25
+            invert=True,
+            mmss=False,
+        ),
+        right_axis=None,
         left_series=[
-            SeriesSpec(col="run_50m_sec", label="50m（秒）", color=c(1), lw=2.6),
+            SeriesSpec(key="run_100m_sec", label="50m (秒)", color=BASE_COLORS[0], linewidth=2.8),
         ],
-        y_format="num",
+        right_series=[],
+        roadmap_base_color=BASE_COLORS[0],
     ),
 
-    # P2 走力：1500m（5:00→4:00）補助10sec
-    # 内部は「秒」で扱う（configも秒で定義）
+    # Run: 1500m (mm:ss)
     "run_1500m": ChartSpec(
         title="Run: 1500m",
-        left_axis=AxisSpec(ymin=300, ymax=240, major_step=10, minor_step=None, label="タイム（分:秒）"),
+        x_label="",
+        date_col="date",
+        left_axis=AxisSpec(
+            label="タイム (分:秒)",
+            ylim=(5 * 60 + 0, 4 * 60 + 0),  # 5:00 ~ 4:00
+            major=10.0,
+            minor=10.0,
+            invert=True,
+            mmss=True,
+        ),
+        right_axis=None,
         left_series=[
-            SeriesSpec(col="run_1500m", label="1500m", color=c(1), lw=2.6),
+            SeriesSpec(key="run_1500m_sec", label="1500m", color=BASE_COLORS[2], linewidth=2.8),
         ],
-        y_format="mmss",
+        right_series=[],
+        roadmap_base_color=BASE_COLORS[2],
     ),
 
-    # P2 走力：3000m（10:30→9:30）補助10sec
+    # Run: 3000m (mm:ss)
     "run_3000m": ChartSpec(
         title="Run: 3000m",
-        left_axis=AxisSpec(ymin=630, ymax=570, major_step=10, minor_step=None, label="タイム（分:秒）"),
+        x_label="",
+        date_col="date",
+        left_axis=AxisSpec(
+            label="タイム (分:秒)",
+            ylim=(10 * 60 + 30, 9 * 60 + 30),  # 10:30 ~ 9:30
+            major=10.0,
+            minor=10.0,
+            invert=True,
+            mmss=True,
+        ),
+        right_axis=None,
         left_series=[
-            SeriesSpec(col="run_3000m", label="3000m", color=c(1), lw=2.6),
+            SeriesSpec(key="run_3000m_sec", label="3000m", color=BASE_COLORS[3], linewidth=2.8),
         ],
-        y_format="mmss",
+        right_series=[],
+        roadmap_base_color=BASE_COLORS[3],
     ),
 
-    # P3 学業（順位/偏差値）
+    # Academic: rank (left) + deviation (right)
     "academic_rank_dev": ChartSpec(
-        title="学業：順位・偏差値",
-        left_axis=AxisSpec(ymin=50, ymax=0, major_step=5, minor_step=None, label="学年順位"),
+        title="学業推移（順位・偏差値）",
+        x_label="",
+        date_col="date",
+        left_axis=AxisSpec(
+            label="学年順位",
+            ylim=(50.0, 0.0),  # smaller is better -> higher
+            major=5.0,
+            minor=5.0,
+            invert=True,
+            mmss=False,
+        ),
+        right_axis=AxisSpec(
+            label="偏差値",
+            ylim=(30.0, 80.0),
+            major=5.0,
+            minor=5.0,
+            invert=False,
+            mmss=False,
+        ),
         left_series=[
-            SeriesSpec(col="rank_grade", label="学年順位", color=c(4), lw=2.6),
+            SeriesSpec(key="rank", label="学年順位", color=BASE_COLORS[4], linewidth=2.8),
         ],
-        right_axis=AxisSpec(ymin=30, ymax=80, major_step=5, minor_step=None, label="参考偏差値"),
         right_series=[
-            SeriesSpec(col="deviation", label="偏差値", color=c(5), lw=2.6),
+            SeriesSpec(key="deviation", label="偏差値", color=BASE_COLORS[5], linewidth=2.8),
         ],
-        y_format="num",
+        roadmap_base_color=BASE_COLORS[4],
     ),
 
-    # P3 学業（評点/教科スコア）
-    "academic_scores": ChartSpec(
-        title="学業：評点・教科スコア",
-        left_axis=AxisSpec(ymin=0, ymax=5, major_step=0.5, minor_step=None, label="評点"),
+    # Academic: rating (left) + subject scores (right)
+    "academic_rating_scores": ChartSpec(
+        title="学業推移（評点・教科スコア）",
+        x_label="",
+        date_col="date",
+        left_axis=AxisSpec(
+            label="評点",
+            ylim=(0.0, 5.0),
+            major=0.5,
+            minor=0.5,
+            invert=False,
+            mmss=False,
+        ),
+        right_axis=AxisSpec(
+            label="教科得点",
+            ylim=(50.0, 100.0),
+            major=10.0,
+            minor=10.0,
+            invert=False,
+            mmss=False,
+        ),
         left_series=[
-            SeriesSpec(col="rating", label="評点", color=c(3), lw=2.6),
+            SeriesSpec(key="rating", label="評点", color=BASE_COLORS[0], linewidth=2.8),
         ],
-        right_axis=AxisSpec(ymin=50, ymax=100, major_step=10, minor_step=None, label="教科スコア"),
         right_series=[
-            # 教科は最大5色必要 → 2軸側に複数線
-            SeriesSpec(col="score_jp", label="国語", color=c(1), lw=2.2),
-            SeriesSpec(col="score_math", label="数学", color=c(2), lw=2.2),
-            SeriesSpec(col="score_eng", label="英語", color=c(4), lw=2.2),
-            SeriesSpec(col="score_sci", label="理科", color=c(5), lw=2.2),
-            SeriesSpec(col="score_soc", label="社会", color=c(6), lw=2.2),
+            SeriesSpec(key="score_jp", label="国語", color=BASE_COLORS[1], linewidth=2.5),
+            SeriesSpec(key="score_math", label="数学", color=BASE_COLORS[2], linewidth=2.5),
+            SeriesSpec(key="score_eng", label="英語", color=BASE_COLORS[3], linewidth=2.5),
+            SeriesSpec(key="score_sci", label="理科", color=BASE_COLORS[4], linewidth=2.5),
+            SeriesSpec(key="score_soc", label="社会", color=BASE_COLORS[5], linewidth=2.5),
         ],
-        y_format="num",
+        roadmap_base_color=BASE_COLORS[0],
     ),
 }
