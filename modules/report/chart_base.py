@@ -3,46 +3,46 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 
-_MPL_READY = False
 
-
-def require_mpl() -> None:
+def require_mpl():
     """
-    matplotlib を遅延importし、Noto Sans JP を必ず登録する。
-    Streamlit Cloud（Linux）でも文字化けを再発させないための唯一の入口。
+    Matplotlib を遅延importする（Streamlit Cloudでも安全に動くようにする）。
     """
-    global _MPL_READY
-    if _MPL_READY:
-        return
-
     import matplotlib
-    import matplotlib.pyplot as plt  # noqa: F401
-    from matplotlib import font_manager, rcParams
+    matplotlib.use("Agg")  # サーバー環境向け
+    import matplotlib.pyplot as plt  # noqa
+    return plt
 
-    # このファイル: .../fa_tra_app/modules/report/chart_base.py
-    # assets:     .../fa_tra_app/assets/fonts/Noto_Sans_JP/NotoSansJP-VariableFont_wght.ttf
-    app_root = Path(__file__).resolve().parents[2]
-    font_path = app_root / "assets" / "fonts" / "Noto_Sans_JP" / "NotoSansJP-VariableFont_wght.ttf"
+
+def apply_jp_font():
+    """
+    assets/fonts/Noto_Sans_JP/NotoSansJP-VariableFont_wght.ttf を優先して設定。
+    """
+    plt = require_mpl()
+    import matplotlib as mpl
+    from matplotlib import font_manager
+
+    # repo root 推定： modules/report/chart_base.py -> modules/report -> modules -> root
+    root = Path(__file__).resolve().parents[2]
+    font_path = root / "assets" / "fonts" / "Noto_Sans_JP" / "NotoSansJP-VariableFont_wght.ttf"
 
     if font_path.exists():
-        try:
-            font_manager.fontManager.addfont(str(font_path))
-            rcParams["font.family"] = ["Noto Sans JP", "DejaVu Sans"]
-        except Exception:
-            # 最悪でも豆腐化しないように一般フォントへフォールバック
-            rcParams["font.family"] = ["DejaVu Sans"]
+        font_manager.fontManager.addfont(str(font_path))
+        prop = font_manager.FontProperties(fname=str(font_path))
+        mpl.rcParams["font.family"] = prop.get_name()
     else:
-        rcParams["font.family"] = ["DejaVu Sans"]
+        # フォールバック（環境依存）
+        mpl.rcParams["font.family"] = ["Noto Sans CJK JP", "Noto Sans JP", "IPAexGothic", "sans-serif"]
 
-    rcParams["axes.unicode_minus"] = False
-    _MPL_READY = True
+    mpl.rcParams["axes.unicode_minus"] = False
+    return plt
 
 
-def _sec_to_mmss(sec: float) -> str:
+def sec_to_mmss(sec: float) -> str:
     try:
         s = int(round(float(sec)))
     except Exception:
@@ -52,203 +52,154 @@ def _sec_to_mmss(sec: float) -> str:
     return f"{m}:{r:02d}"
 
 
-def _format_value(fmt: str, v: float) -> str:
-    if fmt == "mmss":
-        return _sec_to_mmss(v)
-    if fmt == "sec_float":
-        # 50m用
-        return f"{v:.2f}".rstrip("0").rstrip(".")
-    if fmt == "int":
-        try:
-            return str(int(round(v)))
-        except Exception:
-            return ""
-    return f"{v:g}"
+def _set_ticks(ax, ymin: float, ymax: float, step: float):
+    import numpy as np
+    if step <= 0:
+        return
+    lo, hi = float(ymin), float(ymax)
+    # 反転でも ticksは min->max の範囲で作る
+    mn, mx = (min(lo, hi), max(lo, hi))
+    ticks = np.arange(mn, mx + (step * 0.5), step)
+    ax.set_yticks(ticks)
 
 
-def _apply_axis_ticks(ax, vmin: float, vmax: float, major: float, minor: Optional[float], fmt: str):
-    from matplotlib.ticker import MultipleLocator, FuncFormatter
+def _apply_axis_config(ax, axis_cfg):
+    ax.set_ylabel(axis_cfg.label)
+    ax.set_ylim(axis_cfg.ymin, axis_cfg.ymax)
+    _set_ticks(ax, axis_cfg.ymin, axis_cfg.ymax, axis_cfg.major_step)
 
-    # locator
-    ax.yaxis.set_major_locator(MultipleLocator(major))
-    if minor is not None:
-        ax.yaxis.set_minor_locator(MultipleLocator(minor))
+    if axis_cfg.formatter == "sec_to_mmss":
+        ax.set_yticklabels([sec_to_mmss(t) for t in ax.get_yticks()])
 
-    # formatter
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: _format_value(fmt, x)))
-
-    # limits
-    ax.set_ylim(vmin, vmax)
-
-    # grid
-    ax.grid(True, which="major", axis="y", alpha=0.25)
-    if minor is not None:
-        ax.grid(True, which="minor", axis="y", alpha=0.12)
+    if axis_cfg.invert:
+        ax.invert_yaxis()
 
 
-def _safe_series(df: pd.DataFrame, col: str):
-    if col not in df.columns:
-        return None
-    s = pd.to_numeric(df[col], errors="coerce")
-    if s.notna().sum() == 0:
-        return None
-    return s
+def _ensure_dt(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
+    out = df.copy()
+    if date_col not in out.columns:
+        out[date_col] = pd.NaT
+    out["_dt"] = pd.to_datetime(out[date_col], errors="coerce")
+    out = out[out["_dt"].notna()].sort_values("_dt").reset_index(drop=True)
+    return out
 
 
-@dataclass(frozen=True)
-class BuiltAxes:
-    fig: object
-    ax_left: object
-    ax_right: Optional[object]
+def _ym_from_dt(ts: pd.Timestamp) -> str:
+    return f"{ts.year:04d}-{ts.month:02d}"
 
 
 def build_line_chart(
     df: pd.DataFrame,
-    spec,
-    period_text: Optional[str] = None,
-    roadmap_df: Optional[pd.DataFrame] = None,
-) -> object:
+    chart_spec,
+    period_text: str = "",
+    roadmap: Optional[Dict[str, Dict[str, Any]]] = None,
+):
     """
-    spec: chart_config.ChartSpec
-    df: date_col + series cols
-    roadmap_df: ROADMAP(目標帯)のdf（同じdate_colで揃える）
+    chart_spec: ChartSpec（chart_config.py の定義）
+    roadmap: ym -> {col_low/col_mid/col_high: value, ...}
     """
-    require_mpl()
-    import matplotlib.pyplot as plt
+    plt = apply_jp_font()
 
-    if df is None or df.empty:
-        fig = plt.figure(figsize=(10, 3.4))
-        plt.text(0.5, 0.5, "No data", ha="center", va="center")
-        plt.axis("off")
-        return fig
+    # 前処理
+    dff = _ensure_dt(df, chart_spec.date_col)
 
-    # date col
-    date_col = spec.date_col
-    if date_col not in df.columns:
-        # 最低限のフォールバック
-        df = df.copy()
-        df[date_col] = range(len(df))
-
-    x = pd.to_datetime(df[date_col], errors="coerce")
-    if x.isna().all():
-        # 文字列/数値ならそのまま
-        x = df[date_col]
-
-    fig = plt.figure(figsize=(10, 3.6))
+    fig = plt.figure(figsize=(10.8, 4.6))
     ax = fig.add_subplot(111)
 
-    # Title
-    title = spec.title
+    ax2 = ax.twinx() if chart_spec.right_axis else None
+
+    # 軸設定
+    _apply_axis_config(ax, chart_spec.left_axis)
+    if ax2 is not None:
+        _apply_axis_config(ax2, chart_spec.right_axis)
+
+    # グリッド（見やすさ）
+    ax.grid(True, axis="y", linestyle=":", linewidth=0.8, alpha=0.6)
+
+    # タイトル
+    title = chart_spec.title
     if period_text:
-        ax.set_title(f"{title}\n{period_text}", fontsize=11)
-    else:
-        ax.set_title(title, fontsize=11)
+        title = f"{title}\n{period_text}"
+    ax.set_title(title)
 
-    # Left axis
-    ax.set_ylabel(spec.left_axis.label)
-    _apply_axis_ticks(
-        ax,
-        spec.left_axis.vmin,
-        spec.left_axis.vmax,
-        spec.left_axis.major_step,
-        spec.left_axis.minor_step,
-        spec.left_axis.value_format,
-    )
+    # プロット
+    from .chart_config import get_base_color, get_roadmap_color  # local import to avoid cycles
 
-    # plot left lines
-    from .chart_config import PALETTE_RGB01, darken, lighten
+    x = dff["_dt"]
 
-    for i, col in enumerate(spec.left_cols):
-        s = _safe_series(df, col)
-        if s is None:
+    for s in chart_spec.series:
+        if s.col not in dff.columns:
+            # 欠けても落とさない
             continue
-        color = PALETTE_RGB01[spec.palette_index_left[i % len(spec.palette_index_left)]]
-        ax.plot(x, s, color=color, linewidth=2.4, marker="o", markersize=5.0, label=spec.left_labels[i])
-
-        # ROADMAP (low/mid/high)
-        if spec.roadmap and spec.roadmap.enabled and spec.roadmap_cols and col in spec.roadmap_cols:
-            if roadmap_df is not None and not roadmap_df.empty:
-                low_c, mid_c, high_c = spec.roadmap_cols[col]
-                for kind, cfunc, label_suffix in [
-                    ("low", darken, "目標(低)"),
-                    ("mid", lambda c: c, "目標(中)"),
-                    ("high", lighten, "目標(高)"),
-                ]:
-                    rcol = {"low": low_c, "mid": mid_c, "high": high_c}[kind]
-                    rs = _safe_series(roadmap_df, rcol)
-                    if rs is None:
-                        continue
-                    rx = pd.to_datetime(roadmap_df[date_col], errors="coerce")
-                    if rx.isna().all():
-                        rx = roadmap_df[date_col]
-                    ax.plot(
-                        rx,
-                        rs,
-                        color=cfunc(color),
-                        linewidth=spec.roadmap.linewidth,
-                        linestyle=spec.roadmap.linestyle,
-                        alpha=spec.roadmap.alpha,
-                        label=f"{spec.left_labels[i]} {label_suffix}",
-                    )
-
-    # Right axis
-    ax2 = None
-    if spec.right_axis is not None and len(spec.right_cols) > 0:
-        ax2 = ax.twinx()
-        ax2.set_ylabel(spec.right_axis.label)
-        _apply_axis_ticks(
-            ax2,
-            spec.right_axis.vmin,
-            spec.right_axis.vmax,
-            spec.right_axis.major_step,
-            spec.right_axis.minor_step,
-            spec.right_axis.value_format,
+        y = pd.to_numeric(dff[s.col], errors="coerce")
+        target_ax = ax if s.axis == "left" else ax2
+        if target_ax is None:
+            target_ax = ax
+        color = get_base_color(s.color_index)
+        target_ax.plot(
+            x,
+            y,
+            label=s.label,
+            linewidth=s.linewidth,
+            marker=s.marker,
+            color=color,
         )
 
-        for i, col in enumerate(spec.right_cols):
-            s = _safe_series(df, col)
-            if s is None:
-                continue
-            color = PALETTE_RGB01[spec.palette_index_right[i % len(spec.palette_index_right)]]
-            ax2.plot(x, s, color=color, linewidth=2.4, marker="o", markersize=5.0, label=spec.right_labels[i])
+    # ROADMAP（low/mid/high を点線で重ねる）
+    if roadmap and chart_spec.roadmap:
+        for rm in chart_spec.roadmap:
+            # roadmap col: {rm.col}_low/mid/high を参照
+            low_key = f"{rm.col}_low"
+            mid_key = f"{rm.col}_mid"
+            high_key = f"{rm.col}_high"
 
-            # ROADMAP
-            if spec.roadmap and spec.roadmap.enabled and spec.roadmap_cols and col in spec.roadmap_cols:
-                if roadmap_df is not None and not roadmap_df.empty:
-                    low_c, mid_c, high_c = spec.roadmap_cols[col]
-                    for kind, cfunc, label_suffix in [
-                        ("low", darken, "目標(低)"),
-                        ("mid", lambda c: c, "目標(中)"),
-                        ("high", lighten, "目標(高)"),
-                    ]:
-                        rcol = {"low": low_c, "mid": mid_c, "high": high_c}[kind]
-                        rs = _safe_series(roadmap_df, rcol)
-                        if rs is None:
-                            continue
-                        rx = pd.to_datetime(roadmap_df[date_col], errors="coerce")
-                        if rx.isna().all():
-                            rx = roadmap_df[date_col]
-                        ax2.plot(
-                            rx,
-                            rs,
-                            color=cfunc(color),
-                            linewidth=spec.roadmap.linewidth,
-                            linestyle=spec.roadmap.linestyle,
-                            alpha=spec.roadmap.alpha,
-                            label=f"{spec.right_labels[i]} {label_suffix}",
-                        )
+            # xごとに ym を作って roadmap から値を拾う
+            y_low = []
+            y_mid = []
+            y_high = []
+            for ts in x:
+                ym = _ym_from_dt(pd.Timestamp(ts))
+                row = roadmap.get(ym, {}) if roadmap else {}
+                y_low.append(row.get(low_key))
+                y_mid.append(row.get(mid_key))
+                y_high.append(row.get(high_key))
 
-    # Legend (merge)
-    handles1, labels1 = ax.get_legend_handles_labels()
+            target_ax = ax if rm.axis == "left" else ax2
+            if target_ax is None:
+                target_ax = ax
+
+            # ベース色は「その系列が存在する場合は同じ color_index を使う」方針
+            # → rm.col と一致する series を探す
+            color_index = None
+            for s in chart_spec.series:
+                if s.col == rm.col:
+                    color_index = s.color_index
+                    break
+            if color_index is None:
+                color_index = 1
+
+            c_low = get_roadmap_color(color_index, "low", rm.low_factor, rm.mid_factor, rm.high_factor)
+            c_mid = get_roadmap_color(color_index, "mid", rm.low_factor, rm.mid_factor, rm.high_factor)
+            c_high = get_roadmap_color(color_index, "high", rm.low_factor, rm.mid_factor, rm.high_factor)
+
+            # “普通(mid)”は基本色で細い点線、lowは暗め、highは明るめ
+            target_ax.plot(x, y_low, linestyle=rm.style, linewidth=rm.linewidth, alpha=rm.alpha, color=c_low)
+            target_ax.plot(x, y_mid, linestyle=rm.style, linewidth=rm.linewidth, alpha=rm.alpha, color=c_mid)
+            target_ax.plot(x, y_high, linestyle=rm.style, linewidth=rm.linewidth, alpha=rm.alpha, color=c_high)
+
+    # 凡例（左右の両方をまとめる）
+    handles = []
+    labels = []
+    h1, l1 = ax.get_legend_handles_labels()
+    handles += h1
+    labels += l1
     if ax2 is not None:
-        handles2, labels2 = ax2.get_legend_handles_labels()
-        handles = handles1 + handles2
-        labels = labels1 + labels2
-    else:
-        handles, labels = handles1, labels1
+        h2, l2 = ax2.get_legend_handles_labels()
+        handles += h2
+        labels += l2
 
     if handles:
-        ax.legend(handles, labels, loc="upper right", fontsize=9, framealpha=0.85)
+        ax.legend(handles, labels, loc="upper left", frameon=True)
 
     fig.tight_layout()
     return fig
