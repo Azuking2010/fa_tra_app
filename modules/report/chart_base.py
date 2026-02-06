@@ -1,7 +1,6 @@
 # modules/report/chart_base.py
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -10,82 +9,63 @@ import pandas as pd
 
 def require_mpl():
     """
-    Matplotlib を遅延importする（Streamlit Cloudでも安全に動くようにする）。
+    matplotlib は Streamlit Cloud でも動く前提。
+    import コストを抑えるため遅延 import にする。
     """
-    import matplotlib
-    matplotlib.use("Agg")  # サーバー環境向け
     import matplotlib.pyplot as plt  # noqa
     return plt
 
 
 def apply_jp_font():
     """
-    assets/fonts/Noto_Sans_JP/NotoSansJP-VariableFont_wght.ttf を優先して設定。
+    assets/fonts/Noto_Sans_JP/NotoSansJP-VariableFont_wght.ttf を使う。
+    フォントが無い/読めない環境でも落とさず、デフォルトにフォールバック。
     """
     plt = require_mpl()
-    import matplotlib as mpl
-    from matplotlib import font_manager
+    try:
+        import matplotlib.font_manager as fm
 
-    # repo root 推定： modules/report/chart_base.py -> modules/report -> modules -> root
-    root = Path(__file__).resolve().parents[2]
-    font_path = root / "assets" / "fonts" / "Noto_Sans_JP" / "NotoSansJP-VariableFont_wght.ttf"
+        base = Path(__file__).resolve().parents[2]  # fa_tra_app/
+        font_path = base / "assets" / "fonts" / "Noto_Sans_JP" / "NotoSansJP-VariableFont_wght.ttf"
+        if font_path.exists():
+            fp = fm.FontProperties(fname=str(font_path))
+            # グローバル設定（表示の一貫性優先）
+            import matplotlib as mpl
 
-    if font_path.exists():
-        font_manager.fontManager.addfont(str(font_path))
-        prop = font_manager.FontProperties(fname=str(font_path))
-        mpl.rcParams["font.family"] = prop.get_name()
-    else:
-        # フォールバック（環境依存）
-        mpl.rcParams["font.family"] = ["Noto Sans CJK JP", "Noto Sans JP", "IPAexGothic", "sans-serif"]
-
-    mpl.rcParams["axes.unicode_minus"] = False
+            mpl.rcParams["font.family"] = fp.get_name()
+    except Exception:
+        # フォント設定失敗しても落とさない
+        pass
     return plt
 
 
-def sec_to_mmss(sec: float) -> str:
+def _ensure_dt(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
+    dff = df.copy()
+    if date_col not in dff.columns:
+        dff[date_col] = pd.NaT
+    dff[date_col] = pd.to_datetime(dff[date_col], errors="coerce")
+    dff = dff.sort_values(date_col).reset_index(drop=True)
+    return dff
+
+
+def _pick_color(colors: Tuple[str, ...], idx: int) -> str:
+    if not colors:
+        return "#1f77b4"
+    return colors[idx % len(colors)]
+
+
+def _format_mmss(sec: Any) -> str:
     try:
-        s = int(round(float(sec)))
+        if sec is None:
+            return ""
+        v = float(sec)
+        if v != v:  # NaN
+            return ""
+        m = int(v // 60)
+        s = int(round(v - m * 60))
+        return f"{m}:{s:02d}"
     except Exception:
         return ""
-    m = s // 60
-    r = s % 60
-    return f"{m}:{r:02d}"
-
-
-def _set_ticks(ax, ymin: float, ymax: float, step: float):
-    import numpy as np
-    if step <= 0:
-        return
-    lo, hi = float(ymin), float(ymax)
-    # 反転でも ticksは min->max の範囲で作る
-    mn, mx = (min(lo, hi), max(lo, hi))
-    ticks = np.arange(mn, mx + (step * 0.5), step)
-    ax.set_yticks(ticks)
-
-
-def _apply_axis_config(ax, axis_cfg):
-    ax.set_ylabel(axis_cfg.label)
-    ax.set_ylim(axis_cfg.ymin, axis_cfg.ymax)
-    _set_ticks(ax, axis_cfg.ymin, axis_cfg.ymax, axis_cfg.major_step)
-
-    if axis_cfg.formatter == "sec_to_mmss":
-        ax.set_yticklabels([sec_to_mmss(t) for t in ax.get_yticks()])
-
-    if axis_cfg.invert:
-        ax.invert_yaxis()
-
-
-def _ensure_dt(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
-    out = df.copy()
-    if date_col not in out.columns:
-        out[date_col] = pd.NaT
-    out["_dt"] = pd.to_datetime(out[date_col], errors="coerce")
-    out = out[out["_dt"].notna()].sort_values("_dt").reset_index(drop=True)
-    return out
-
-
-def _ym_from_dt(ts: pd.Timestamp) -> str:
-    return f"{ts.year:04d}-{ts.month:02d}"
 
 
 def build_line_chart(
@@ -93,28 +73,25 @@ def build_line_chart(
     chart_spec,
     period_text: str = "",
     roadmap: Optional[Dict[str, Dict[str, Any]]] = None,
+    *,
+    show_latest_annotation: bool = False,  # ← report_charts.py が渡してくるので必須
 ):
     """
-    chart_spec: ChartSpec（chart_config.py の定義）
+    chart_spec: chart_config.py の ChartSpec
     roadmap: ym -> {col_low/col_mid/col_high: value, ...}
     """
+    # 遅延 import
     plt = apply_jp_font()
+    import matplotlib.ticker as mticker
+    from matplotlib.ticker import MultipleLocator
+    from matplotlib.dates import DateFormatter, AutoDateLocator
 
-    # 前処理
     dff = _ensure_dt(df, chart_spec.date_col)
 
+    # Figure/Axes
     fig = plt.figure(figsize=(10.8, 4.6))
     ax = fig.add_subplot(111)
-
     ax2 = ax.twinx() if chart_spec.right_axis else None
-
-    # 軸設定
-    _apply_axis_config(ax, chart_spec.left_axis)
-    if ax2 is not None:
-        _apply_axis_config(ax2, chart_spec.right_axis)
-
-    # グリッド（見やすさ）
-    ax.grid(True, axis="y", linestyle=":", linewidth=0.8, alpha=0.6)
 
     # タイトル
     title = chart_spec.title
@@ -122,84 +99,140 @@ def build_line_chart(
         title = f"{title}\n{period_text}"
     ax.set_title(title)
 
-    # プロット
-    from .chart_config import get_base_color, get_roadmap_color  # local import to avoid cycles
+    # X軸
+    ax.xaxis.set_major_locator(AutoDateLocator())
+    ax.xaxis.set_major_formatter(DateFormatter("%Y-%m-%d"))
+    for label in ax.get_xticklabels():
+        label.set_rotation(0)
 
-    x = dff["_dt"]
+    # 軸ラベル
+    ax.set_ylabel(chart_spec.left_axis.label)
+    if ax2 is not None:
+        ax2.set_ylabel(chart_spec.right_axis.label)
 
-    for s in chart_spec.series:
-        if s.col not in dff.columns:
-            # 欠けても落とさない
+    # ---- Y軸スケール（config準拠）----
+    def _apply_axis_scale(_ax, axis_spec):
+        if axis_spec is None:
+            return
+        ymin, ymax = axis_spec.ymin, axis_spec.ymax
+
+        # invert=True の場合は「上が小さい（速い）」などが自然に表現できる
+        if axis_spec.invert:
+            _ax.set_ylim(ymax, ymin)
+        else:
+            _ax.set_ylim(ymin, ymax)
+
+        # 目盛り（major/minor）
+        if axis_spec.major_tick:
+            _ax.yaxis.set_major_locator(MultipleLocator(axis_spec.major_tick))
+        if axis_spec.minor_tick:
+            _ax.yaxis.set_minor_locator(MultipleLocator(axis_spec.minor_tick))
+        _ax.grid(True, axis="y", which="major", linestyle="-", alpha=0.25)
+        _ax.grid(True, axis="y", which="minor", linestyle=":", alpha=0.15)
+
+    _apply_axis_scale(ax, chart_spec.left_axis)
+    if ax2 is not None:
+        _apply_axis_scale(ax2, chart_spec.right_axis)
+
+    # 秒 → mm:ss 表示
+    if getattr(chart_spec.left_axis, "formatter", None) == "mmss":
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, pos: _format_mmss(x)))
+    if ax2 is not None and getattr(chart_spec.right_axis, "formatter", None) == "mmss":
+        ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, pos: _format_mmss(x)))
+
+    # ---- 実データ系列 ----
+    colors = getattr(chart_spec, "palette", ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"))
+
+    plotted_last_points = []  # 注釈用
+    for i, s in enumerate(chart_spec.series):
+        y_col = s.col
+        if y_col not in dff.columns:
             continue
-        y = pd.to_numeric(dff[s.col], errors="coerce")
-        target_ax = ax if s.axis == "left" else ax2
-        if target_ax is None:
-            target_ax = ax
-        color = get_base_color(s.color_index)
-        target_ax.plot(
+        x = dff[chart_spec.date_col]
+        y = pd.to_numeric(dff[y_col], errors="coerce")
+
+        tgt_ax = ax2 if (ax2 is not None and s.axis == "right") else ax
+        color = _pick_color(colors, i)
+
+        line = tgt_ax.plot(
             x,
             y,
             label=s.label,
-            linewidth=s.linewidth,
-            marker=s.marker,
+            linewidth=s.width if s.width else 2.2,
+            linestyle=s.linestyle if s.linestyle else "-",
+            marker=s.marker if s.marker else "o",
+            markersize=s.marker_size if s.marker_size else 4.8,
             color=color,
         )
 
-    # ROADMAP（low/mid/high を点線で重ねる）
-    if roadmap and chart_spec.roadmap:
-        for rm in chart_spec.roadmap:
-            # roadmap col: {rm.col}_low/mid/high を参照
-            low_key = f"{rm.col}_low"
-            mid_key = f"{rm.col}_mid"
-            high_key = f"{rm.col}_high"
+        # 最新点
+        if show_latest_annotation and getattr(chart_spec, "latest_annotation", False):
+            try:
+                valid = y.dropna()
+                if len(valid) > 0:
+                    last_idx = valid.index[-1]
+                    plotted_last_points.append((tgt_ax, x.loc[last_idx], y.loc[last_idx], s, color))
+            except Exception:
+                pass
 
-            # xごとに ym を作って roadmap から値を拾う
-            y_low = []
-            y_mid = []
-            y_high = []
-            for ts in x:
-                ym = _ym_from_dt(pd.Timestamp(ts))
-                row = roadmap.get(ym, {}) if roadmap else {}
-                y_low.append(row.get(low_key))
-                y_mid.append(row.get(mid_key))
-                y_high.append(row.get(high_key))
+    # ---- ROADMAP（low/mid/high）を点線で重ねる（指定がある時だけ）----
+    if roadmap and getattr(chart_spec, "roadmap_keys", None):
+        # roadmap_keys: (low_col, mid_col, high_col)
+        low_key, mid_key, high_key = chart_spec.roadmap_keys
+        # 月を日付に展開（該当月の1日）
+        xs = []
+        low_vals, mid_vals, high_vals = [], [], []
+        for ym, row in roadmap.items():
+            try:
+                dt = pd.to_datetime(f"{ym}-01", errors="coerce")
+            except Exception:
+                dt = pd.NaT
+            if pd.isna(dt):
+                continue
+            xs.append(dt)
+            low_vals.append(row.get(low_key))
+            mid_vals.append(row.get(mid_key))
+            high_vals.append(row.get(high_key))
 
-            target_ax = ax if rm.axis == "left" else ax2
-            if target_ax is None:
-                target_ax = ax
+        # どっちの軸に出すか（基本は左。右軸が指定されているなら series 側に合わせる）
+        tgt = ax
+        if ax2 is not None and getattr(chart_spec, "roadmap_axis", "left") == "right":
+            tgt = ax2
 
-            # ベース色は「その系列が存在する場合は同じ color_index を使う」方針
-            # → rm.col と一致する series を探す
-            color_index = None
-            for s in chart_spec.series:
-                if s.col == rm.col:
-                    color_index = s.color_index
-                    break
-            if color_index is None:
-                color_index = 1
+        def _plot_rm(vals, style: str, alpha: float):
+            v = pd.to_numeric(pd.Series(vals), errors="coerce")
+            tgt.plot(xs, v, linestyle=style, linewidth=1.2, alpha=alpha)
 
-            c_low = get_roadmap_color(color_index, "low", rm.low_factor, rm.mid_factor, rm.high_factor)
-            c_mid = get_roadmap_color(color_index, "mid", rm.low_factor, rm.mid_factor, rm.high_factor)
-            c_high = get_roadmap_color(color_index, "high", rm.low_factor, rm.mid_factor, rm.high_factor)
+        # low/mid/high を薄い点線で
+        _plot_rm(low_vals, ":", 0.55)
+        _plot_rm(mid_vals, "--", 0.55)
+        _plot_rm(high_vals, ":", 0.55)
 
-            # “普通(mid)”は基本色で細い点線、lowは暗め、highは明るめ
-            target_ax.plot(x, y_low, linestyle=rm.style, linewidth=rm.linewidth, alpha=rm.alpha, color=c_low)
-            target_ax.plot(x, y_mid, linestyle=rm.style, linewidth=rm.linewidth, alpha=rm.alpha, color=c_mid)
-            target_ax.plot(x, y_high, linestyle=rm.style, linewidth=rm.linewidth, alpha=rm.alpha, color=c_high)
-
-    # 凡例（左右の両方をまとめる）
-    handles = []
-    labels = []
-    h1, l1 = ax.get_legend_handles_labels()
-    handles += h1
-    labels += l1
+    # 凡例（左右の系列を統合）
+    handles, labels = ax.get_legend_handles_labels()
     if ax2 is not None:
         h2, l2 = ax2.get_legend_handles_labels()
         handles += h2
         labels += l2
-
     if handles:
-        ax.legend(handles, labels, loc="upper left", frameon=True)
+        ax.legend(handles, labels, loc="upper right", frameon=True)
+
+    # 最新値注釈
+    if plotted_last_points:
+        for tgt_ax, x0, y0, s, color in plotted_last_points:
+            try:
+                txt = _format_mmss(y0) if getattr(tgt_ax.yaxis.get_major_formatter(), "__class__", None).__name__ == "FuncFormatter" and "format_mmss" in str(tgt_ax.yaxis.get_major_formatter()) else f"{y0:.2f}".rstrip("0").rstrip(".")
+                tgt_ax.annotate(
+                    txt,
+                    xy=(x0, y0),
+                    xytext=(6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    fontsize=9,
+                    color=color,
+                )
+            except Exception:
+                pass
 
     fig.tight_layout()
     return fig
