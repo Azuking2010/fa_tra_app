@@ -702,7 +702,7 @@ if page == "ROADMAP":
     st.stop()
 
 if page == "レポート":
-    render_report(st, storage)
+    render_report(storage)
     st.stop()
 
 if page == "ポートフォリオ":
