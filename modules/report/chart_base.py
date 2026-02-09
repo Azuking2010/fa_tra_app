@@ -83,8 +83,8 @@ def build_line_chart(
     # 遅延 import
     plt = apply_jp_font()
     import matplotlib.ticker as mticker
+    from matplotlib.dates import AutoDateLocator, DateFormatter
     from matplotlib.ticker import MultipleLocator
-    from matplotlib.dates import DateFormatter, AutoDateLocator
 
     dff = _ensure_dt(df, chart_spec.date_col)
 
@@ -111,22 +111,47 @@ def build_line_chart(
         ax2.set_ylabel(chart_spec.right_axis.label)
 
     # ---- Y軸スケール（config準拠）----
+    def _axis_get(axis_spec, key: str, default=None):
+        """
+        axis_spec が dataclass/obj でも dict でも安全に読む。
+        """
+        if axis_spec is None:
+            return default
+        if isinstance(axis_spec, dict):
+            return axis_spec.get(key, default)
+        return getattr(axis_spec, key, default)
+
     def _apply_axis_scale(_ax, axis_spec):
         if axis_spec is None:
             return
-        ymin, ymax = axis_spec.ymin, axis_spec.ymax
 
-        # invert=True の場合は「上が小さい（速い）」などが自然に表現できる
-        if axis_spec.invert:
-            _ax.set_ylim(ymax, ymin)
-        else:
-            _ax.set_ylim(ymin, ymax)
+        ymin = _axis_get(axis_spec, "ymin", None)
+        ymax = _axis_get(axis_spec, "ymax", None)
+        invert = bool(_axis_get(axis_spec, "invert", False))
 
-        # 目盛り（major/minor）
-        if axis_spec.major_tick:
-            _ax.yaxis.set_major_locator(MultipleLocator(axis_spec.major_tick))
-        if axis_spec.minor_tick:
-            _ax.yaxis.set_minor_locator(MultipleLocator(axis_spec.minor_tick))
+        # ymin/ymax が揃っている場合のみ ylim を設定
+        if ymin is not None and ymax is not None:
+            if invert:
+                _ax.set_ylim(ymax, ymin)
+            else:
+                _ax.set_ylim(ymin, ymax)
+
+        # 目盛り（major/minor）: 存在しない設定は無視（落とさない）
+        major_tick = _axis_get(axis_spec, "major_tick", None)
+        minor_tick = _axis_get(axis_spec, "minor_tick", None)
+
+        try:
+            if major_tick:
+                _ax.yaxis.set_major_locator(MultipleLocator(major_tick))
+        except Exception:
+            pass
+
+        try:
+            if minor_tick:
+                _ax.yaxis.set_minor_locator(MultipleLocator(minor_tick))
+        except Exception:
+            pass
+
         _ax.grid(True, axis="y", which="major", linestyle="-", alpha=0.25)
         _ax.grid(True, axis="y", which="minor", linestyle=":", alpha=0.15)
 
@@ -141,7 +166,11 @@ def build_line_chart(
         ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, pos: _format_mmss(x)))
 
     # ---- 実データ系列 ----
-    colors = getattr(chart_spec, "palette", ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"))
+    colors = getattr(
+        chart_spec,
+        "palette",
+        ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"),
+    )
 
     plotted_last_points = []  # 注釈用
     for i, s in enumerate(chart_spec.series):
@@ -154,7 +183,7 @@ def build_line_chart(
         tgt_ax = ax2 if (ax2 is not None and s.axis == "right") else ax
         color = _pick_color(colors, i)
 
-        line = tgt_ax.plot(
+        tgt_ax.plot(
             x,
             y,
             label=s.label,
@@ -221,7 +250,16 @@ def build_line_chart(
     if plotted_last_points:
         for tgt_ax, x0, y0, s, color in plotted_last_points:
             try:
-                txt = _format_mmss(y0) if getattr(tgt_ax.yaxis.get_major_formatter(), "__class__", None).__name__ == "FuncFormatter" and "format_mmss" in str(tgt_ax.yaxis.get_major_formatter()) else f"{y0:.2f}".rstrip("0").rstrip(".")
+                # mm:ss formatter の時だけ mm:ss、そうでなければ小数表示
+                formatter_name = tgt_ax.yaxis.get_major_formatter().__class__.__name__
+                if formatter_name == "FuncFormatter" and getattr(s, "formatter", None) == "mmss":
+                    txt = _format_mmss(y0)
+                else:
+                    try:
+                        txt = f"{float(y0):.2f}".rstrip("0").rstrip(".")
+                    except Exception:
+                        txt = str(y0)
+
                 tgt_ax.annotate(
                     txt,
                     xy=(x0, y0),
