@@ -1,3 +1,7 @@
+# file: app.py
+# purpose: FA_TRA_APPのメイン入口。ページ設定、storage生成、画面切替、各UIモジュール呼び出しを担当する。
+#          画面ごとの詳細ロジックはmodules配下に分離し、app.pyは薄く保つ。
+
 import streamlit as st
 from datetime import date
 import math
@@ -20,6 +24,9 @@ from modules.roadmap.ui_roadmap import render_roadmap
 
 # ★REPORTページ（グラフ＆PDF/JSON出力）
 from modules.report.ui_report import render_report
+
+# ★IDPページ
+from modules.ui_idp import render_idp
 
 
 # ======================
@@ -85,20 +92,17 @@ def _latest_non_empty(df, col):
 
     s = df[col]
 
-    # object（文字列など）
     if s.dtype == object:
         vals = s.astype(str).tolist()
         for v in reversed(vals):
             vv = str(v).strip()
             if vv.lower() in ["nan", "none", "null"]:
                 vv = ""
-            # "0" も無効扱い
             if vv == "" or vv == "0" or vv == "0.0":
                 continue
             return vv
         return None
 
-    # 数値
     try:
         vals = s.tolist()
         for v in reversed(vals):
@@ -122,7 +126,7 @@ def _latest_bool(df, col):
     """同日の行の中で、最後に出てきた bool を採用（無ければFalse）"""
     if df is None or df.empty or col not in df.columns:
         return False
-    # boolは0/1扱いになるケースもあるので、文字列判定に寄せる
+
     vals = df[col].tolist()
     for v in reversed(vals):
         if v is None:
@@ -155,7 +159,6 @@ def _prev_bool_caption(st_container, v):
     if s in ["false", "0", "no", "n", "off"]:
         st_container.caption("前回値：OFF")
         return
-    # 想定外でも文字で出す
     st_container.caption(f"前回値：{v}")
 
 
@@ -238,7 +241,6 @@ def _filter_portfolio_by_date(dfp, selected_date: date):
         out = dfp.loc[mask].copy()
         return out
     except Exception:
-        # フォールバック：文字列一致
         iso = str(selected_date)
         mask = dfp["date"].astype(str).str.strip() == iso
         return dfp.loc[mask].copy()
@@ -256,7 +258,6 @@ def _compute_global_latest_values(dfp_all):
 
     df = dfp_all.copy()
 
-    # 日付でソート（parseできないものは最後に寄せる）
     try:
         import pandas as pd
         dt = pd.to_datetime(df["date"], errors="coerce") if "date" in df.columns else None
@@ -266,7 +267,6 @@ def _compute_global_latest_values(dfp_all):
     except Exception:
         pass
 
-    # tcenter は最後に見つかった bool を採用（無ければFalseとして扱えるが、前回値表示は None で抑制）
     if "tcenter" in df.columns:
         vals = df["tcenter"].tolist()
         found = None
@@ -280,7 +280,6 @@ def _compute_global_latest_values(dfp_all):
         if found is not None:
             latest["tcenter"] = found
 
-    # その他列：前から順に見て、非空が出たら更新（最後に残ったものが最新）
     for col in df.columns:
         if col in ["_dt"]:
             continue
@@ -541,123 +540,31 @@ def render_portfolio_fixed(st, storage):
 # ======================
 # Storage / Master
 # ======================
-storage = build_storage(st)  # secrets があれば Sheets、なければ CSV
+storage = build_storage(st)
 train_df = load_training_list()
 
 # ======================
-# ★互換パッチ：親ビューが要求する load_all_records を SheetsStorage に付与
+# ★互換パッチ：親ビューが要求する load_all_records を storage に付与
 # ======================
 def _attach_load_all_records_compat(storage_obj):
     """
-    render_parent_view() が storage.load_all_records() を要求するが、
-    SheetsStorage に未実装のケースがあるため互換メソッドを付与する。
-
-    今回は「storageがworksheetを公開してない」ケースでも動くように、
-    storage内部の spreadsheet/client を使って worksheet(name) を開き直して読む。
+    旧storage互換用。
+    新storage.pyでは load_all_records() を正式実装しているため、通常は何もしない。
     """
-    if hasattr(storage_obj, "load_all_records"):
+    if hasattr(storage_obj, "load_all_records") and callable(getattr(storage_obj, "load_all_records")):
         return
 
     import types
 
-    def _find_spreadsheet_and_wsname(self):
-        """
-        storage.get_info() にある worksheet 名と、
-        storage内部の spreadsheet / client っぽい属性から Spreadsheet を取り出す。
-        """
-        info = {}
-        if hasattr(self, "get_info") and callable(getattr(self, "get_info")):
-            info = self.get_info() or {}
-
-        ws_name = info.get("worksheet") or info.get("log_worksheet") or "log"
-        ss_id = info.get("spreadsheet_id")
-
-        # 1) 既にSpreadsheetを持っている場合（sh/spreadsheetなど）
-        for attr in ["sh", "spreadsheet", "_sh", "_spreadsheet", "ss", "_ss"]:
-            sh = getattr(self, attr, None)
-            if sh is not None and hasattr(sh, "worksheet"):
-                return sh, ws_name
-
-        # 2) gspread client を持っている場合（gc/clientなど）→ open_by_key
-        for attr in ["gc", "client", "_gc", "_client", "gclient"]:
-            gc = getattr(self, attr, None)
-            if gc is not None and ss_id and hasattr(gc, "open_by_key"):
-                try:
-                    sh = gc.open_by_key(ss_id)
-                    if sh is not None and hasattr(sh, "worksheet"):
-                        return sh, ws_name
-                except Exception:
-                    pass
-
-        return None, ws_name
-
     def load_all_records(self):
-        import pandas as pd
-
-        # 0) 既に似たメソッドがあるならそれを使う（壊さない）
-        candidate_methods = [
-            "load_all_log",
-            "load_all_logs",
-            "load_all_train_log",
-            "load_all_training_log",
-            "load_all_training",
-            "load_all_records_df",
-            "load_all",
-        ]
-        for m in candidate_methods:
-            if hasattr(self, m) and callable(getattr(self, m)):
-                return getattr(self, m)()
-
-        # 1) worksheetオブジェクトが公開されているなら読む
-        candidate_ws_attrs = [
-            "log_ws", "ws", "worksheet", "_ws", "_worksheet",
-            "log_worksheet", "sheet", "_sheet",
-        ]
-        for a in candidate_ws_attrs:
-            ws = getattr(self, a, None)
-            if ws is None:
-                continue
-            if hasattr(ws, "get_all_records"):
-                rows = ws.get_all_records()
-                return pd.DataFrame(rows)
-            if hasattr(ws, "get_all_values"):
-                values = ws.get_all_values()
-                if not values or len(values) < 2:
-                    return pd.DataFrame()
-                header = values[0]
-                body = values[1:]
-                return pd.DataFrame(body, columns=header)
-
-        # 2) 公開されてない場合でも、spreadsheetから worksheet名で開き直す
-        sh, ws_name = _find_spreadsheet_and_wsname(self)
-        if sh is not None:
-            try:
-                ws = sh.worksheet(ws_name)
-                rows = ws.get_all_records()
-                return pd.DataFrame(rows)
-            except Exception:
-                # get_all_values フォールバック
-                try:
-                    ws = sh.worksheet(ws_name)
-                    values = ws.get_all_values()
-                    if not values or len(values) < 2:
-                        return pd.DataFrame()
-                    header = values[0]
-                    body = values[1:]
-                    return pd.DataFrame(body, columns=header)
-                except Exception as e:
-                    raise RuntimeError(f"Failed to read worksheet '{ws_name}' from spreadsheet: {e}")
-
-        # 3) ここまで全部ダメなら、storage構造の情報が足りない
-        raise AttributeError(
-            "SheetsStorage compatible loader could not find spreadsheet/client to read all records."
-        )
+        if hasattr(self, "load_records") and callable(getattr(self, "load_records")):
+            return self.load_records()
+        raise AttributeError("storage.load_all_records() is not available.")
 
     storage_obj.load_all_records = types.MethodType(load_all_records, storage_obj)
 
 
 _attach_load_all_records_compat(storage)
-
 
 
 # ======================
@@ -684,12 +591,14 @@ with st.sidebar:
             st.caption(f"portfolio_worksheet: {info['portfolio_worksheet']}")
         if "roadmap_worksheet" in info:
             st.caption(f"roadmap_worksheet: {info['roadmap_worksheet']}")
+        if "idp_profile_worksheet" in info:
+            st.caption(f"IDP: {info['idp_profile_worksheet']} / {info.get('idp_review_worksheet', 'IDP_Review')}")
 
     st.divider()
     st.caption("ページ")
     page = st.radio(
         "ページ",
-        ["トレーニング", "ポートフォリオ", "ROADMAP", "レポート"],
+        ["トレーニング", "IDP", "ポートフォリオ", "ROADMAP", "レポート"],
         index=0,
         label_visibility="collapsed",
     )
@@ -697,6 +606,10 @@ with st.sidebar:
 # ======================
 # ページ切替
 # ======================
+if page == "IDP":
+    render_idp(st, storage)
+    st.stop()
+
 if page == "ROADMAP":
     render_roadmap(st)
     st.stop()
