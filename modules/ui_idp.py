@@ -9,6 +9,7 @@ from html import escape
 from typing import Any, Optional
 
 import pandas as pd
+import streamlit as _st
 
 from modules.common_constants import (
     calc_grade_label,
@@ -21,6 +22,32 @@ from modules.ui_components import (
     latest_row,
     score_badge,
 )
+
+
+IDP_CACHE_TTL_SECONDS = 60 * 60 * 12  # 12時間
+
+
+# =========================
+# Cached loader
+# =========================
+@_st.cache_data(ttl=IDP_CACHE_TTL_SECONDS, show_spinner=False)
+def _load_idp_data_cached(_storage, storage_key: str, cache_version: int):
+    """
+    IDPデータを12時間キャッシュして読み込む。
+    _storage は Streamlit cache のhash対象から外すため、先頭に underscore を付ける。
+
+    storage_key:
+        spreadsheet_id等が変わった場合にキャッシュを分けるためのキー。
+    cache_version:
+        手動再読み込みボタンで更新するための番号。
+    """
+    df_profile = _storage.load_all_idp_profile()
+    df_goals = _storage.load_all_idp_goals()
+    df_player = _storage.load_all_idp_player_profile()
+    df_action = _storage.load_all_idp_action_plan()
+    df_review = _storage.load_all_idp_review()
+
+    return df_profile, df_goals, df_player, df_action, df_review
 
 
 # =========================
@@ -501,6 +528,27 @@ def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
         if c not in d.columns:
             d[c] = ""
     return d
+
+
+def _build_storage_key(storage) -> str:
+    """
+    キャッシュの分離用キー。
+    API呼び出しを増やさないため、storage.get_info() の情報だけを使う。
+    """
+    try:
+        info = storage.get_info() or {}
+    except Exception:
+        info = {}
+
+    parts = [
+        str(info.get("spreadsheet_id", "")),
+        str(info.get("idp_profile_worksheet", "IDP_Profile")),
+        str(info.get("idp_goals_worksheet", "IDP_Goals")),
+        str(info.get("idp_player_profile_worksheet", "IDP_PlayerProfile")),
+        str(info.get("idp_action_plan_worksheet", "IDP_ActionPlan")),
+        str(info.get("idp_review_worksheet", "IDP_Review")),
+    ]
+    return "|".join(parts)
 
 
 def _category_label(value: Any) -> str:
@@ -1192,21 +1240,32 @@ def render_idp(st, storage) -> None:
         st.error("現在のstorageではIDP機能が利用できません。")
         return
 
-    ok, msg = storage.idp_healthcheck()
-    if ok:
-        st.success(msg)
-    else:
-        st.warning(msg)
+    if "idp_cache_version" not in st.session_state:
+        st.session_state["idp_cache_version"] = 0
+
+    with st.expander("IDPデータ更新", expanded=False):
+        st.caption("IDPは12時間キャッシュします。Sheetsを編集した直後に反映したい場合だけ再読み込みしてください。")
+        if st.button("IDPデータを再読み込み", use_container_width=True):
+            _load_idp_data_cached.clear()
+            st.session_state["idp_cache_version"] += 1
+            st.success("IDPキャッシュをクリアしました。再読み込みします。")
+            st.rerun()
+
+    storage_key = _build_storage_key(storage)
 
     try:
-        df_profile = storage.load_all_idp_profile()
-        df_goals = storage.load_all_idp_goals()
-        df_player = storage.load_all_idp_player_profile()
-        df_action = storage.load_all_idp_action_plan()
-        df_review = storage.load_all_idp_review()
+        with st.spinner("IDPデータを読み込み中..."):
+            df_profile, df_goals, df_player, df_action, df_review = _load_idp_data_cached(
+                storage,
+                storage_key,
+                st.session_state["idp_cache_version"],
+            )
     except Exception as e:
         st.error(f"IDPデータの読み込みに失敗しました：{e}")
+        st.info("短時間に何度も開いた場合は、Google Sheets APIの一時制限に当たることがあります。少し時間を置くか、後ほど再読み込みしてください。")
         return
+
+    st.caption("IDPデータ：12時間キャッシュ中")
 
     _render_header(st, df_profile)
     _render_priority_actions(st, df_action)
