@@ -19,7 +19,6 @@ from modules.common_constants import (
 from modules.ui_components import (
     display_dataframe,
     latest_row,
-    safe_text,
     score_badge,
 )
 
@@ -76,13 +75,16 @@ def _inject_idp_css(st) -> None:
     letter-spacing: 0.08em;
     min-width: 260px;
     text-align: center;
+    white-space: nowrap;
 }
 
 .idp-frame-content {
     margin-top: 34px;
 }
 
-/* 優先アクション：1列の横長カード */
+/* =========================
+   優先アクション
+   ========================= */
 .idp-action-list {
     display: flex;
     flex-direction: column;
@@ -103,10 +105,18 @@ def _inject_idp_css(st) -> None:
     margin-bottom: 10px;
 }
 
+.idp-action-main {
+    margin-top: 8px;
+    font-size: 17px;
+    line-height: 1.7;
+    color: #123f4c;
+}
+
 .idp-action-meta {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 8px 18px;
+    margin-top: 8px;
 }
 
 .idp-action-line {
@@ -115,13 +125,9 @@ def _inject_idp_css(st) -> None:
     color: #24505d;
 }
 
-.idp-action-main {
-    margin-top: 8px;
-    font-size: 17px;
-    line-height: 1.7;
-    color: #123f4c;
-}
-
+/* =========================
+   目標
+   ========================= */
 .idp-goal-row {
     display: grid;
     grid-template-columns: 170px 1fr;
@@ -212,6 +218,9 @@ def _inject_idp_css(st) -> None:
     color: #697d86;
 }
 
+/* =========================
+   プレイヤープロファイル
+   ========================= */
 .idp-profile-layout {
     display: grid;
     grid-template-columns: 240px 1fr;
@@ -264,6 +273,19 @@ def _inject_idp_css(st) -> None:
     margin: 5px 0;
 }
 
+/* =========================
+   アクションプラン
+   PC表示：表風
+   スマホ表示：PLANカード
+   ========================= */
+.idp-plan-desktop {
+    display: block;
+}
+
+.idp-plan-mobile {
+    display: none;
+}
+
 .idp-plan-table {
     display: grid;
     grid-template-columns: 1.1fr 2.3fr 1.2fr 1.1fr 1.1fr;
@@ -291,6 +313,52 @@ def _inject_idp_css(st) -> None:
     min-height: 46px;
 }
 
+.idp-mobile-plan-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.idp-mobile-plan-card {
+    border: 2px solid #0aa7c8;
+    border-radius: 14px;
+    padding: 16px;
+    background: #fbfeff;
+}
+
+.idp-mobile-plan-title {
+    font-size: 22px;
+    font-weight: 900;
+    color: #063849;
+    margin-bottom: 12px;
+}
+
+.idp-mobile-plan-item {
+    border: 1.5px solid #b9e6ef;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-top: 10px;
+    background: #ffffff;
+}
+
+.idp-mobile-plan-label {
+    font-size: 12px;
+    color: #0aa7c8;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+}
+
+.idp-mobile-plan-value {
+    font-size: 17px;
+    color: #0a3b4d;
+    font-weight: 800;
+    line-height: 1.6;
+}
+
+/* =========================
+   レビュー
+   ========================= */
 .idp-review-card {
     border: 2px solid #0aa7c8;
     border-radius: 16px;
@@ -328,7 +396,37 @@ def _inject_idp_css(st) -> None:
     padding: 10px 0;
 }
 
+/* =========================
+   Mobile
+   ========================= */
 @media (max-width: 900px) {
+    .idp-hero {
+        padding: 18px 16px;
+    }
+
+    .idp-hero-title {
+        font-size: 24px;
+    }
+
+    .idp-hero-sub {
+        font-size: 16px;
+    }
+
+    .idp-frame {
+        padding: 38px 16px 22px 16px;
+        margin: 32px 0 34px 0;
+    }
+
+    .idp-frame-label {
+        min-width: 210px;
+        max-width: 78%;
+        padding: 9px 24px 12px 24px;
+        font-size: 21px;
+        letter-spacing: 0.03em;
+        white-space: normal;
+        line-height: 1.25;
+    }
+
     .idp-action-meta {
         grid-template-columns: 1fr;
     }
@@ -346,8 +444,12 @@ def _inject_idp_css(st) -> None:
         grid-template-columns: 1fr;
     }
 
-    .idp-plan-table {
-        grid-template-columns: 1fr;
+    .idp-plan-desktop {
+        display: none;
+    }
+
+    .idp-plan-mobile {
+        display: block;
     }
 
     .idp-review-score-grid {
@@ -392,9 +494,6 @@ def _norm(value: Any) -> str:
 
 
 def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-    """
-    Sheets側の列不足・旧データ・手入力ゆれで落ちないようにする。
-    """
     if df is None:
         df = pd.DataFrame()
     d = df.copy()
@@ -515,10 +614,6 @@ def _sort_done_goals(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _filter_goals(df_goals: pd.DataFrame, term: str, limit: Optional[int] = None) -> pd.DataFrame:
-    """
-    termごとの目標を取得する。
-    status列が無い場合でも落ちないようにし、空欄statusはactive扱いにする。
-    """
     if df_goals is None or df_goals.empty:
         return pd.DataFrame()
 
@@ -912,29 +1007,76 @@ def _render_action_plan_table(st, df_action: pd.DataFrame) -> None:
         )
         d = _sort_by_priority(d).head(12)
 
-        header = """
-<div class="idp-plan-table">
-  <div class="idp-plan-head">何を</div>
-  <div class="idp-plan-head">どのように</div>
-  <div class="idp-plan-head">誰が</div>
-  <div class="idp-plan-head">頻度</div>
-  <div class="idp-plan-head">いつまでに</div>
+        desktop_header = """
+<div class="idp-plan-desktop">
+  <div class="idp-plan-table">
+    <div class="idp-plan-head">何を</div>
+    <div class="idp-plan-head">どのように</div>
+    <div class="idp-plan-head">誰が</div>
+    <div class="idp-plan-head">頻度</div>
+    <div class="idp-plan-head">いつまでに</div>
 """
-        cells = []
-        for _, row in d.iterrows():
+        desktop_cells = []
+
+        mobile_cards = ['<div class="idp-plan-mobile"><div class="idp-mobile-plan-list">']
+
+        for idx, (_, row) in enumerate(d.iterrows(), start=1):
+            priority_raw = _txt(row.get("priority"), "")
+            plan_no = priority_raw if priority_raw not in ["", "—"] else str(idx)
+
             what = _html(row.get("theme"))
             how = _html(row.get("action"))
             who = _html(row.get("who"), "自分")
             frequency = _html(row.get("frequency"))
             target = _html(row.get("target_period"))
 
-            cells.append(f'<div class="idp-plan-cell">{what}</div>')
-            cells.append(f'<div class="idp-plan-cell">{how}</div>')
-            cells.append(f'<div class="idp-plan-cell">{who}</div>')
-            cells.append(f'<div class="idp-plan-cell">{frequency}</div>')
-            cells.append(f'<div class="idp-plan-cell">{target}</div>')
+            desktop_cells.append(f'<div class="idp-plan-cell">{what}</div>')
+            desktop_cells.append(f'<div class="idp-plan-cell">{how}</div>')
+            desktop_cells.append(f'<div class="idp-plan-cell">{who}</div>')
+            desktop_cells.append(f'<div class="idp-plan-cell">{frequency}</div>')
+            desktop_cells.append(f'<div class="idp-plan-cell">{target}</div>')
 
-        body = header + "".join(cells) + "</div>"
+            mobile_cards.append(
+                f"""
+<div class="idp-mobile-plan-card">
+  <div class="idp-mobile-plan-title">PLAN {escape(plan_no)}</div>
+
+  <div class="idp-mobile-plan-item">
+    <div class="idp-mobile-plan-label">What</div>
+    <div class="idp-mobile-plan-value">{what}</div>
+  </div>
+
+  <div class="idp-mobile-plan-item">
+    <div class="idp-mobile-plan-label">How</div>
+    <div class="idp-mobile-plan-value">{how}</div>
+  </div>
+
+  <div class="idp-mobile-plan-item">
+    <div class="idp-mobile-plan-label">Who</div>
+    <div class="idp-mobile-plan-value">{who}</div>
+  </div>
+
+  <div class="idp-mobile-plan-item">
+    <div class="idp-mobile-plan-label">Frequency</div>
+    <div class="idp-mobile-plan-value">{frequency}</div>
+  </div>
+
+  <div class="idp-mobile-plan-item">
+    <div class="idp-mobile-plan-label">Until</div>
+    <div class="idp-mobile-plan-value">{target}</div>
+  </div>
+</div>
+"""
+            )
+
+        desktop_html = desktop_header + "".join(desktop_cells) + """
+  </div>
+</div>
+"""
+        mobile_html = "".join(mobile_cards) + """
+</div></div>
+"""
+        body = desktop_html + mobile_html
 
     _render_html(st, _frame_start("アクションプラン") + body + _frame_end())
 
