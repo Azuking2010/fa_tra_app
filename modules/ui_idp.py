@@ -31,10 +31,6 @@ def _inject_idp_css(st) -> None:
     st.markdown(
         """
 <style>
-.idp-page-wrap {
-    width: 100%;
-}
-
 .idp-hero {
     background: linear-gradient(135deg, #e8f7fb 0%, #ffffff 65%);
     border: 2px solid #0aa7c8;
@@ -84,6 +80,46 @@ def _inject_idp_css(st) -> None:
 
 .idp-frame-content {
     margin-top: 34px;
+}
+
+/* 優先アクション：1列の横長カード */
+.idp-action-list {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.idp-action-card {
+    border: 2px solid #0aa7c8;
+    border-radius: 14px;
+    padding: 16px 18px;
+    background: #fbfeff;
+}
+
+.idp-action-title {
+    color: #063849;
+    font-size: 21px;
+    font-weight: 900;
+    margin-bottom: 10px;
+}
+
+.idp-action-meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 18px;
+}
+
+.idp-action-line {
+    font-size: 16px;
+    line-height: 1.65;
+    color: #24505d;
+}
+
+.idp-action-main {
+    margin-top: 8px;
+    font-size: 17px;
+    line-height: 1.7;
+    color: #123f4c;
 }
 
 .idp-goal-row {
@@ -174,33 +210,6 @@ def _inject_idp_css(st) -> None:
     margin-top: 8px;
     font-size: 14px;
     color: #697d86;
-}
-
-.idp-action-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 16px;
-}
-
-.idp-action-card {
-    border: 2px solid #0aa7c8;
-    border-radius: 14px;
-    padding: 16px;
-    background: #fbfeff;
-}
-
-.idp-action-title {
-    color: #063849;
-    font-size: 20px;
-    font-weight: 900;
-    margin-bottom: 10px;
-}
-
-.idp-action-line {
-    font-size: 15px;
-    line-height: 1.65;
-    color: #24505d;
-    margin: 5px 0;
 }
 
 .idp-profile-layout {
@@ -320,22 +329,27 @@ def _inject_idp_css(st) -> None:
 }
 
 @media (max-width: 900px) {
+    .idp-action-meta {
+        grid-template-columns: 1fr;
+    }
+
     .idp-goal-row {
         grid-template-columns: 1fr;
         gap: 8px;
     }
-    .idp-action-grid {
-        grid-template-columns: 1fr;
-    }
+
     .idp-profile-layout {
         grid-template-columns: 1fr;
     }
+
     .idp-profile-card-grid {
         grid-template-columns: 1fr;
     }
+
     .idp-plan-table {
         grid-template-columns: 1fr;
     }
+
     .idp-review-score-grid {
         grid-template-columns: 1fr 1fr;
     }
@@ -375,6 +389,19 @@ def _norm(value: Any) -> str:
     if _is_blank(value):
         return ""
     return str(value).strip().lower()
+
+
+def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """
+    Sheets側の列不足・旧データ・手入力ゆれで落ちないようにする。
+    """
+    if df is None:
+        df = pd.DataFrame()
+    d = df.copy()
+    for c in columns:
+        if c not in d.columns:
+            d[c] = ""
+    return d
 
 
 def _category_label(value: Any) -> str:
@@ -447,24 +474,31 @@ def _priority_num(value: Any) -> float:
 
 def _sort_by_priority(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
-        return df
+        return pd.DataFrame()
+
     d = df.copy()
-    if "priority" in d.columns:
-        d["_priority_num"] = d["priority"].apply(_priority_num)
-        sort_cols = ["_priority_num"]
-        ascending = [True]
-        if "target_date" in d.columns:
-            d["_target_dt"] = pd.to_datetime(d["target_date"], errors="coerce")
-            sort_cols.append("_target_dt")
-            ascending.append(True)
-        d = d.sort_values(sort_cols, ascending=ascending, na_position="last")
-        d = d.drop(columns=[c for c in ["_priority_num", "_target_dt"] if c in d.columns])
+
+    if "priority" not in d.columns:
+        d["priority"] = ""
+
+    d["_priority_num"] = d["priority"].apply(_priority_num)
+
+    sort_cols = ["_priority_num"]
+    ascending = [True]
+
+    if "target_date" in d.columns:
+        d["_target_dt"] = pd.to_datetime(d["target_date"], errors="coerce")
+        sort_cols.append("_target_dt")
+        ascending.append(True)
+
+    d = d.sort_values(sort_cols, ascending=ascending, na_position="last")
+    d = d.drop(columns=[c for c in ["_priority_num", "_target_dt"] if c in d.columns])
     return d.reset_index(drop=True)
 
 
 def _sort_done_goals(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
-        return df
+        return pd.DataFrame()
 
     d = df.copy()
     date_candidates = ["target_date", "updated_at", "created_at", "date"]
@@ -481,14 +515,25 @@ def _sort_done_goals(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _filter_goals(df_goals: pd.DataFrame, term: str, limit: Optional[int] = None) -> pd.DataFrame:
-    if df_goals is None or df_goals.empty or "term" not in df_goals.columns:
+    """
+    termごとの目標を取得する。
+    status列が無い場合でも落ちないようにし、空欄statusはactive扱いにする。
+    """
+    if df_goals is None or df_goals.empty:
         return pd.DataFrame()
 
-    d = df_goals.copy()
+    d = _ensure_columns(
+        df_goals,
+        ["term", "status", "priority", "target_date", "goal_title", "goal_detail", "category"],
+    )
+
     d = d[d["term"].astype(str).str.strip().str.lower() == term]
-    if "status" in d.columns:
-        d = d[d["status"].apply(lambda x: not _is_done_status(x))]
-        d = d[d["status"].apply(_is_active_status)]
+
+    if d.empty:
+        return pd.DataFrame()
+
+    d = d[d["status"].apply(lambda x: not _is_done_status(x))]
+    d = d[d["status"].apply(_is_active_status)]
 
     d = _sort_by_priority(d)
 
@@ -500,54 +545,6 @@ def _filter_goals(df_goals: pd.DataFrame, term: str, limit: Optional[int] = None
 
 def _render_html(st, html: str) -> None:
     st.markdown(html, unsafe_allow_html=True)
-
-
-def _goal_card(row: pd.Series, css_class: str = "") -> str:
-    title = _html(row.get("goal_title"))
-    detail = _html(row.get("goal_detail"), "")
-    target_date = _txt(row.get("target_date"), "")
-    category = _category_label(row.get("category"))
-    priority = _txt(row.get("priority"), "")
-
-    meta_parts = []
-    if priority not in ["", "—"]:
-        meta_parts.append(f"優先：{escape(priority)}")
-    if category not in ["", "—"]:
-        meta_parts.append(f"カテゴリ：{escape(category)}")
-    if target_date not in ["", "—"]:
-        meta_parts.append(f"期限：{escape(target_date)}")
-
-    meta_html = ""
-    if meta_parts:
-        meta_html = f'<div class="idp-goal-meta">{"　|　".join(meta_parts)}</div>'
-
-    detail_html = ""
-    if detail:
-        detail_html = f'<div class="idp-goal-detail">{detail}</div>'
-
-    return f"""
-<div class="idp-goal-card {css_class}">
-  <div class="idp-goal-title">{title}</div>
-  {detail_html}
-  {meta_html}
-</div>
-"""
-
-
-def _goal_section_html(side_title: str, rows: pd.DataFrame, css_class: str, side_small: str = "") -> str:
-    small = f'<span class="idp-goal-side-small">{escape(side_small)}</span>' if side_small else ""
-
-    if rows is None or rows.empty:
-        cards = '<div class="idp-empty">まだ設定されていません。</div>'
-    else:
-        cards = "".join(_goal_card(row, css_class) for _, row in rows.iterrows())
-
-    return f"""
-<div class="idp-goal-row">
-  <div class="idp-goal-side">{escape(side_title)}{small}</div>
-  <div class="idp-goal-main">{cards}</div>
-</div>
-"""
 
 
 def _frame_start(title: str) -> str:
@@ -566,7 +563,7 @@ def _frame_end() -> str:
 
 
 # =========================
-# Header / Profile
+# Header
 # =========================
 def _render_header(st, df_profile: pd.DataFrame) -> None:
     row = latest_row(df_profile)
@@ -623,9 +620,21 @@ def _render_priority_actions(st, df_action: pd.DataFrame) -> None:
     if df_action is None or df_action.empty:
         actions = pd.DataFrame()
     else:
-        actions = df_action.copy()
-        if "status" in actions.columns:
-            actions = actions[actions["status"].apply(_is_active_status)]
+        actions = _ensure_columns(
+            df_action,
+            [
+                "priority",
+                "theme",
+                "category",
+                "issue",
+                "action",
+                "frequency",
+                "related_training",
+                "target_period",
+                "status",
+            ],
+        )
+        actions = actions[actions["status"].apply(_is_active_status)]
         actions = _sort_by_priority(actions).head(5)
 
     if actions.empty:
@@ -646,28 +655,73 @@ def _render_priority_actions(st, df_action: pd.DataFrame) -> None:
                 f"""
 <div class="idp-action-card">
   <div class="idp-action-title">優先{priority}｜{theme}</div>
-  <div class="idp-action-line"><b>カテゴリ：</b>{category}</div>
-  <div class="idp-action-line"><b>課題：</b>{issue}</div>
-  <div class="idp-action-line"><b>行動：</b>{action}</div>
-  <div class="idp-action-line"><b>頻度：</b>{frequency}</div>
-  <div class="idp-action-line"><b>関連：</b>{related}</div>
-  <div class="idp-action-line"><b>期間：</b>{target}</div>
+  <div class="idp-action-main"><b>行動：</b>{action}</div>
+  <div class="idp-action-meta">
+    <div class="idp-action-line"><b>カテゴリ：</b>{category}</div>
+    <div class="idp-action-line"><b>頻度：</b>{frequency}</div>
+    <div class="idp-action-line"><b>課題：</b>{issue}</div>
+    <div class="idp-action-line"><b>関連：</b>{related}</div>
+    <div class="idp-action-line"><b>期間：</b>{target}</div>
+  </div>
 </div>
 """
             )
-        body = f'<div class="idp-action-grid">{"".join(cards)}</div>'
+        body = f'<div class="idp-action-list">{"".join(cards)}</div>'
 
-    _render_html(
-        st,
-        _frame_start("今月の優先アクション")
-        + body
-        + _frame_end(),
-    )
+    _render_html(st, _frame_start("今月の優先アクション") + body + _frame_end())
 
 
 # =========================
 # Goals
 # =========================
+def _goal_card(row: pd.Series, css_class: str = "") -> str:
+    title = _html(row.get("goal_title"))
+    detail = _html(row.get("goal_detail"), "")
+    target_date = _txt(row.get("target_date"), "")
+    category = _category_label(row.get("category"))
+    priority = _txt(row.get("priority"), "")
+
+    meta_parts = []
+    if priority not in ["", "—"]:
+        meta_parts.append(f"優先：{escape(priority)}")
+    if category not in ["", "—"]:
+        meta_parts.append(f"カテゴリ：{escape(category)}")
+    if target_date not in ["", "—"]:
+        meta_parts.append(f"期限：{escape(target_date)}")
+
+    meta_html = ""
+    if meta_parts:
+        meta_html = f'<div class="idp-goal-meta">{"　|　".join(meta_parts)}</div>'
+
+    detail_html = ""
+    if detail:
+        detail_html = f'<div class="idp-goal-detail">{detail}</div>'
+
+    return f"""
+<div class="idp-goal-card {css_class}">
+  <div class="idp-goal-title">{title}</div>
+  {detail_html}
+  {meta_html}
+</div>
+"""
+
+
+def _goal_section_html(side_title: str, rows: pd.DataFrame, css_class: str, side_small: str = "") -> str:
+    small = f'<span class="idp-goal-side-small">{escape(side_small)}</span>' if side_small else ""
+
+    if rows is None or rows.empty:
+        cards = '<div class="idp-empty">まだ設定されていません。</div>'
+    else:
+        cards = "".join(_goal_card(row, css_class) for _, row in rows.iterrows())
+
+    return f"""
+<div class="idp-goal-row">
+  <div class="idp-goal-side">{escape(side_title)}{small}</div>
+  <div class="idp-goal-main">{cards}</div>
+</div>
+"""
+
+
 def _render_goals_dashboard(st, df_goals: pd.DataFrame) -> None:
     if df_goals is None or df_goals.empty:
         _render_html(
@@ -678,17 +732,18 @@ def _render_goals_dashboard(st, df_goals: pd.DataFrame) -> None:
         )
         return
 
+    df_goals = _ensure_columns(
+        df_goals,
+        ["term", "status", "priority", "target_date", "goal_title", "goal_detail", "category"],
+    )
+
     final_goals = _filter_goals(df_goals, "final", limit=1)
     long_goals = _filter_goals(df_goals, "long", limit=2)
     middle_goals = _filter_goals(df_goals, "middle", limit=3)
     short_goals = _filter_goals(df_goals, "short", limit=10)
     my_rules = _filter_goals(df_goals, "my_rule", limit=5)
 
-    done_goals = df_goals.copy()
-    if "status" in done_goals.columns:
-        done_goals = done_goals[done_goals["status"].apply(_is_done_status)]
-    else:
-        done_goals = pd.DataFrame()
+    done_goals = df_goals[df_goals["status"].apply(_is_done_status)].copy()
     done_goals = _sort_done_goals(done_goals).head(5)
 
     html = _frame_start("目標")
@@ -706,25 +761,11 @@ def _render_goals_dashboard(st, df_goals: pd.DataFrame) -> None:
 # =========================
 # Player Profile
 # =========================
-def _type_label(value: Any) -> str:
-    raw = _norm(value)
-    mapping = {
-        "strength": "強み",
-        "weakness": "課題",
-        "feature": "特徴",
-        "risk": "注意点",
-        "強み": "強み",
-        "課題": "課題",
-        "特徴": "特徴",
-        "注意": "注意点",
-        "注意点": "注意点",
-    }
-    return mapping.get(raw, _txt(value))
-
-
 def _rows_by_type(df: pd.DataFrame, type_name: str) -> pd.DataFrame:
-    if df is None or df.empty or "type" not in df.columns:
+    if df is None or df.empty:
         return pd.DataFrame()
+
+    d = _ensure_columns(df, ["type", "priority", "category", "item", "detail"])
 
     targets = {
         "strength": ["strength", "強み"],
@@ -733,7 +774,6 @@ def _rows_by_type(df: pd.DataFrame, type_name: str) -> pd.DataFrame:
         "risk": ["risk", "注意", "注意点"],
     }.get(type_name, [type_name])
 
-    d = df.copy()
     d["_type_norm"] = d["type"].astype(str).str.strip().str.lower()
     target_norm = [str(x).strip().lower() for x in targets]
     d = d[d["_type_norm"].isin(target_norm)]
@@ -761,13 +801,20 @@ def _category_profile_cards(df_player: pd.DataFrame) -> str:
     if df_player is None or df_player.empty:
         return '<div class="idp-empty">未設定</div>'
 
-    d = df_player.copy()
-    if "category" not in d.columns:
-        d["category"] = "その他"
+    d = _ensure_columns(df_player, ["category", "priority", "item", "detail"])
 
-    preferred = ["technical", "テクニカル", "physical", "フィジカル", "tactical", "タクティカル", "mental", "メンタル"]
+    preferred = [
+        "technical",
+        "テクニカル",
+        "physical",
+        "フィジカル",
+        "tactical",
+        "タクティカル",
+        "mental",
+        "メンタル",
+    ]
+
     cards = []
-
     used_indexes = set()
 
     for cat in preferred:
@@ -777,15 +824,17 @@ def _category_profile_cards(df_player: pd.DataFrame) -> str:
 
         used_indexes.update(sub.index.tolist())
         label = _category_label(cat)
+
         lines = []
         for _, row in _sort_by_priority(sub).head(5).iterrows():
-            mark = "✓"
             item = _html(row.get("item"))
             detail = _html(row.get("detail"), "")
             if detail and detail != "—":
-                lines.append(f"<div class='idp-profile-card-item'>{mark} <b>{item}</b><br><span style='font-size:14px;'>{detail}</span></div>")
+                lines.append(
+                    f"<div class='idp-profile-card-item'>✓ <b>{item}</b><br><span style='font-size:14px;'>{detail}</span></div>"
+                )
             else:
-                lines.append(f"<div class='idp-profile-card-item'>{mark} <b>{item}</b></div>")
+                lines.append(f"<div class='idp-profile-card-item'>✓ <b>{item}</b></div>")
 
         cards.append(
             f"""
@@ -803,7 +852,9 @@ def _category_profile_cards(df_player: pd.DataFrame) -> str:
             item = _html(row.get("item"))
             detail = _html(row.get("detail"), "")
             if detail and detail != "—":
-                lines.append(f"<div class='idp-profile-card-item'>✓ <b>{item}</b><br><span style='font-size:14px;'>{detail}</span></div>")
+                lines.append(
+                    f"<div class='idp-profile-card-item'>✓ <b>{item}</b><br><span style='font-size:14px;'>{detail}</span></div>"
+                )
             else:
                 lines.append(f"<div class='idp-profile-card-item'>✓ <b>{item}</b></div>")
 
@@ -855,7 +906,11 @@ def _render_action_plan_table(st, df_action: pd.DataFrame) -> None:
     if df_action is None or df_action.empty:
         body = '<div class="idp-empty">IDP_ActionPlan にデータがありません。</div>'
     else:
-        d = _sort_by_priority(df_action).head(12)
+        d = _ensure_columns(
+            df_action,
+            ["theme", "action", "who", "frequency", "target_period", "priority"],
+        )
+        d = _sort_by_priority(d).head(12)
 
         header = """
 <div class="idp-plan-table">
@@ -889,21 +944,14 @@ def _render_action_plan_table(st, df_action: pd.DataFrame) -> None:
 # =========================
 def _sort_reviews(df_review: pd.DataFrame) -> pd.DataFrame:
     if df_review is None or df_review.empty:
-        return df_review
+        return pd.DataFrame()
 
-    d = df_review.copy()
+    d = _ensure_columns(df_review, ["review_month", "review_date", "priority"])
 
-    if "review_month" in d.columns:
-        d["_review_dt"] = pd.to_datetime(d["review_month"].astype(str) + "-01", errors="coerce")
-    elif "review_date" in d.columns:
-        d["_review_dt"] = pd.to_datetime(d["review_date"], errors="coerce")
-    else:
-        d["_review_dt"] = pd.NaT
-
-    if "priority" in d.columns:
-        d["_priority_num"] = d["priority"].apply(_priority_num)
-    else:
-        d["_priority_num"] = 9999
+    d["_review_dt"] = pd.to_datetime(d["review_month"].astype(str) + "-01", errors="coerce")
+    fallback_dt = pd.to_datetime(d["review_date"], errors="coerce")
+    d["_review_dt"] = d["_review_dt"].fillna(fallback_dt)
+    d["_priority_num"] = d["priority"].apply(_priority_num)
 
     d = d.sort_values(["_review_dt", "_priority_num"], ascending=[False, True], na_position="last")
     d = d.drop(columns=["_review_dt", "_priority_num"])
@@ -984,12 +1032,7 @@ def _render_reviews(st, df_review: pd.DataFrame) -> None:
 
     latest_html = "".join(_review_card(row) for _, row in latest.iterrows())
 
-    _render_html(
-        st,
-        _frame_start("最新レビュー")
-        + latest_html
-        + _frame_end(),
-    )
+    _render_html(st, _frame_start("最新レビュー") + latest_html + _frame_end())
 
     if not past.empty:
         with st.expander("過去レビューを見る", expanded=False):
@@ -1024,15 +1067,10 @@ def render_idp(st, storage) -> None:
         return
 
     _render_header(st, df_profile)
-
     _render_priority_actions(st, df_action)
-
     _render_goals_dashboard(st, df_goals)
-
     _render_player_profile(st, df_player)
-
     _render_action_plan_table(st, df_action)
-
     _render_reviews(st, df_review)
 
     with st.expander("Sheetsの元データを確認する", expanded=False):
