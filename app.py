@@ -28,6 +28,9 @@ from modules.report.ui_report import render_report
 # ★IDPページ
 from modules.ui_idp import render_idp
 
+# ★練習後メモページ
+from modules.ui_practice_log import render_practice_log
+
 
 # ======================
 # ページ設定
@@ -593,12 +596,14 @@ with st.sidebar:
             st.caption(f"roadmap_worksheet: {info['roadmap_worksheet']}")
         if "idp_profile_worksheet" in info:
             st.caption(f"IDP: {info['idp_profile_worksheet']} / {info.get('idp_review_worksheet', 'IDP_Review')}")
+        if "practice_log_worksheet" in info:
+            st.caption(f"Practice_Log: {info['practice_log_worksheet']}")
 
     st.divider()
     st.caption("ページ")
     page = st.radio(
         "ページ",
-        ["トレーニング", "IDP", "ポートフォリオ", "ROADMAP", "レポート"],
+        ["トレーニング", "練習後メモ", "IDP", "ポートフォリオ", "ROADMAP", "レポート"],
         index=0,
         label_visibility="collapsed",
     )
@@ -606,6 +611,10 @@ with st.sidebar:
 # ======================
 # ページ切替
 # ======================
+if page == "練習後メモ":
+    render_practice_log(st, storage)
+    st.stop()
+
 if page == "IDP":
     render_idp(st, storage)
     st.stop()

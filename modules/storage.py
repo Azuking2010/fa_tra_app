@@ -1,6 +1,6 @@
 # file: modules/storage.py
 # purpose: Google Sheets / CSV fallback の保存・読み込み処理を管理する。
-#          training log、portfolio、ROADMAP、IDP、Training Notice、Daily Schedule のデータアクセスを担当する。
+#          training log、portfolio、ROADMAP、IDP、Training Notice、Daily Schedule、Practice Log のデータアクセスを担当する。
 
 from __future__ import annotations
 
@@ -197,6 +197,21 @@ DAILY_SCHEDULE_COLUMNS = [
     "updated_at",
 ]
 
+# =========================
+# Practice Log schema
+# =========================
+PRACTICE_LOG_COLUMNS = [
+    "log_id",
+    "date",
+    "training_text",
+    "match_text",
+    "self_training_text",
+    "study_text",
+    "source",
+    "created_at",
+    "updated_at",
+]
+
 
 # =========================
 # Base storage interface
@@ -280,6 +295,19 @@ class BaseStorage:
     def load_all_daily_schedule(self) -> pd.DataFrame:
         raise NotImplementedError
 
+    # ----- Practice Log -----
+    def supports_practice_log(self) -> bool:
+        return False
+
+    def practice_log_healthcheck(self) -> Tuple[bool, str]:
+        return False, "Practice_Log: unsupported"
+
+    def append_practice_log_row(self, row: Dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    def load_all_practice_log(self) -> pd.DataFrame:
+        raise NotImplementedError
+
 
 # =========================
 # Sheets storage
@@ -299,6 +327,7 @@ class SheetsStorage(BaseStorage):
     idp_review_worksheet_name: str = "IDP_Review"
     training_notice_master_worksheet_name: str = "Training_Notice_Master"
     daily_schedule_worksheet_name: str = "Daily_Schedule"
+    practice_log_worksheet_name: str = "Practice_Log"
 
     _client: Optional[gspread.Client] = None
 
@@ -371,6 +400,7 @@ class SheetsStorage(BaseStorage):
             "idp_review_worksheet": self.idp_review_worksheet_name,
             "training_notice_master_worksheet": self.training_notice_master_worksheet_name,
             "daily_schedule_worksheet": self.daily_schedule_worksheet_name,
+            "practice_log_worksheet": self.practice_log_worksheet_name,
         }
 
     # ----- health -----
@@ -536,6 +566,24 @@ class SheetsStorage(BaseStorage):
 
         return df
 
+    # ----- Practice Log -----
+    def supports_practice_log(self) -> bool:
+        return True
+
+    def practice_log_healthcheck(self) -> Tuple[bool, str]:
+        try:
+            ws = self._open_ws(self.practice_log_worksheet_name)
+            _ = ws.row_values(1)
+            return True, f"Practice_Log Sheets OK: {self.practice_log_worksheet_name}"
+        except Exception as e:
+            return False, f"Practice_Log Sheets NG: {e}"
+
+    def append_practice_log_row(self, row: Dict[str, Any]) -> None:
+        self._append_row_generic(self.practice_log_worksheet_name, PRACTICE_LOG_COLUMNS, row)
+
+    def load_all_practice_log(self) -> pd.DataFrame:
+        return self._load_sheet_as_df(self.practice_log_worksheet_name, PRACTICE_LOG_COLUMNS)
+
 
 # =========================
 # CSV storage (local fallback)
@@ -553,6 +601,7 @@ class CSVStorage(BaseStorage):
     idp_review_path: str = "idp_review.csv"
     training_notice_master_path: str = "training_notice_master.csv"
     daily_schedule_path: str = "daily_schedule.csv"
+    practice_log_path: str = "practice_log.csv"
 
     def _load_csv_as_df(self, path: str, columns: List[str]) -> pd.DataFrame:
         if not os.path.exists(path):
@@ -700,6 +749,21 @@ class CSVStorage(BaseStorage):
                 df[c] = pd.to_numeric(df[c], errors="coerce")
         return df
 
+    # ===== Practice Log =====
+    def supports_practice_log(self) -> bool:
+        return True
+
+    def practice_log_healthcheck(self) -> Tuple[bool, str]:
+        if not os.path.exists(self.practice_log_path):
+            return True, f"Practice_Log CSV未作成: {self.practice_log_path}（初回保存で自動作成されます）"
+        return True, f"Practice_Log CSV OK: {self.practice_log_path}"
+
+    def append_practice_log_row(self, row: Dict[str, Any]) -> None:
+        self._append_csv_row(self.practice_log_path, PRACTICE_LOG_COLUMNS, row)
+
+    def load_all_practice_log(self) -> pd.DataFrame:
+        return self._load_csv_as_df(self.practice_log_path, PRACTICE_LOG_COLUMNS)
+
 
 # =========================
 # Factory
@@ -771,6 +835,7 @@ def build_storage(st) -> BaseStorage:
             idp_review_ws = str(st.secrets.get("idp_review_worksheet", "IDP_Review")).strip()
             training_notice_master_ws = str(st.secrets.get("training_notice_master_worksheet", "Training_Notice_Master")).strip()
             daily_schedule_ws = str(st.secrets.get("daily_schedule_worksheet", "Daily_Schedule")).strip()
+            practice_log_ws = str(st.secrets.get("practice_log_worksheet", "Practice_Log")).strip()
 
             if spreadsheet_id:
                 return SheetsStorage(
@@ -786,6 +851,7 @@ def build_storage(st) -> BaseStorage:
                     idp_review_worksheet_name=idp_review_ws or "IDP_Review",
                     training_notice_master_worksheet_name=training_notice_master_ws or "Training_Notice_Master",
                     daily_schedule_worksheet_name=daily_schedule_ws or "Daily_Schedule",
+                    practice_log_worksheet_name=practice_log_ws or "Practice_Log",
                 )
     except Exception:
         pass
