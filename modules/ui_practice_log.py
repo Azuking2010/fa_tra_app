@@ -23,6 +23,14 @@ QUESTION_STUDY = """勉強した内容、テスト、提出物、英語、よか
 一言でもOK。"""
 
 
+TEXT_INPUT_KEYS = [
+    "practice_log_training_text",
+    "practice_log_match_text",
+    "practice_log_self_training_text",
+    "practice_log_study_text",
+]
+
+
 def _is_blank(value: Any) -> bool:
     if value is None:
         return True
@@ -54,6 +62,32 @@ def _make_log_id(selected_date: date) -> str:
     return f"PL-{selected_date.strftime('%Y%m%d')}-{stamp}"
 
 
+def _clear_input_boxes(st) -> None:
+    """
+    入力欄をクリアする。
+    日付変更時・保存後に、前回入力内容が残り続けないようにする。
+    """
+    for key in TEXT_INPUT_KEYS:
+        st.session_state[key] = ""
+
+
+def _sync_selected_date_and_clear_if_needed(st, selected_date: date) -> None:
+    """
+    日付が変わったら入力欄をクリアする。
+    これにより、別日付に移動した時に前日の未保存/保存済みメモが残らない。
+    """
+    current_date_text = str(selected_date)
+    prev_date_text = st.session_state.get("practice_log_prev_selected_date")
+
+    if prev_date_text is None:
+        st.session_state["practice_log_prev_selected_date"] = current_date_text
+        return
+
+    if prev_date_text != current_date_text:
+        _clear_input_boxes(st)
+        st.session_state["practice_log_prev_selected_date"] = current_date_text
+
+
 def _sort_logs(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -77,27 +111,6 @@ def _sort_logs(df: pd.DataFrame) -> pd.DataFrame:
     )
     d = d.drop(columns=[c for c in ["_date_dt", "_created_dt"] if c in d.columns])
     return d.reset_index(drop=True)
-
-
-def _render_question_box(st) -> None:
-    with st.expander("何を書けばいい？", expanded=True):
-        st.markdown(
-            """
-**きれいに書かなくてOK。**  
-覚えていることを、そのまま短く残せばOKです。
-
-- 今日、意識したこと
-- チーム練習でやったこと
-- 自主練でやったこと
-- できたこと、良かったこと
-- できなかったこと、悪かったこと
-- コーチからの指摘
-- チーム全体に話されたポイント
-- 勉強でやったこと、困ったこと
-
-帰宅途中に打てない日は、帰宅後にボイスメモでもOK。
-"""
-        )
 
 
 def _has_any_text(*values: str) -> bool:
@@ -146,16 +159,6 @@ def _render_recent_logs(st, df: pd.DataFrame) -> None:
 def render_practice_log(st, storage) -> None:
     st.header("練習後メモ")
 
-    st.markdown(
-        """
-これは評価用の日報ではありません。  
-**忘れる前に、脳内に残っていることを残すためのメモ**です。
-
-全部を埋めなくてOK。  
-書けるところだけ書けばOKです。
-"""
-    )
-
     if not hasattr(storage, "supports_practice_log") or not storage.supports_practice_log():
         st.error("現在のstorageでは Practice_Log 機能が利用できません。")
         return
@@ -168,9 +171,13 @@ def render_practice_log(st, storage) -> None:
         st.info("Google Sheetsに Practice_Log シートを作り、指定ヘッダーを1行目に貼り付けてください。")
         return
 
-    _render_question_box(st)
-
     selected_date = st.date_input("日付", value=date.today(), key="practice_log_date")
+
+    _sync_selected_date_and_clear_if_needed(st, selected_date)
+
+    if st.session_state.pop("practice_log_clear_after_save", False):
+        _clear_input_boxes(st)
+        st.success("練習後メモを保存しました。")
 
     st.divider()
 
@@ -178,7 +185,6 @@ def render_practice_log(st, storage) -> None:
     st.caption(QUESTION_TRAINING)
     training_text = st.text_area(
         "練習メモ",
-        value="",
         placeholder=QUESTION_TRAINING,
         height=150,
         key="practice_log_training_text",
@@ -189,7 +195,6 @@ def render_practice_log(st, storage) -> None:
     st.caption(QUESTION_MATCH)
     match_text = st.text_area(
         "試合メモ",
-        value="",
         placeholder=QUESTION_MATCH,
         height=150,
         key="practice_log_match_text",
@@ -200,7 +205,6 @@ def render_practice_log(st, storage) -> None:
     st.caption(QUESTION_SELF_TRAINING)
     self_training_text = st.text_area(
         "自主練メモ",
-        value="",
         placeholder=QUESTION_SELF_TRAINING,
         height=150,
         key="practice_log_self_training_text",
@@ -211,7 +215,6 @@ def render_practice_log(st, storage) -> None:
     st.caption(QUESTION_STUDY)
     study_text = st.text_area(
         "勉強メモ",
-        value="",
         placeholder=QUESTION_STUDY,
         height=150,
         key="practice_log_study_text",
@@ -246,7 +249,7 @@ def render_practice_log(st, storage) -> None:
 
         try:
             storage.append_practice_log_row(row)
-            st.success("練習後メモを保存しました。")
+            st.session_state["practice_log_clear_after_save"] = True
             st.rerun()
         except Exception as e:
             st.error(f"保存に失敗しました：{e}")
