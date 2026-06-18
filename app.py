@@ -4,6 +4,7 @@
 
 import streamlit as st
 from datetime import date
+from pathlib import Path
 import math
 
 from modules.constants import (
@@ -35,7 +36,14 @@ from modules.ui_practice_log import render_practice_log
 # ======================
 # ページ設定
 # ======================
-st.set_page_config(page_title="FA期間 自主トレチェック", layout="centered")
+APP_ICON_PATH = Path("assets/icon/pep_icon_bobblehead.png")
+APP_ICON = str(APP_ICON_PATH) if APP_ICON_PATH.exists() else "⚽"
+
+st.set_page_config(
+    page_title="FA期間 自主トレチェック",
+    page_icon=APP_ICON,
+    layout="centered",
+)
 
 # ======================
 # CSS（文字サイズ調整）
