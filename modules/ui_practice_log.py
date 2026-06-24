@@ -1,5 +1,5 @@
 # file: modules/ui_practice_log.py
-# purpose: 練習後メモページのUIを担当する。日付ごとに練習・試合・自主練・勉強の自由記述メモを保存・表示する。
+# purpose: 練習/試合後メモページのUIを担当する。日付ごとに練習・試合・自主練・勉強の自由記述メモを保存・表示する。
 
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ def _is_blank(value: Any) -> bool:
             return True
     except Exception:
         pass
+
     s = str(value).strip()
     return s == "" or s.lower() in ["nan", "none", "null"]
 
@@ -109,6 +110,7 @@ def _sort_logs(df: pd.DataFrame) -> pd.DataFrame:
         ascending=[False, False],
         na_position="last",
     )
+
     d = d.drop(columns=[c for c in ["_date_dt", "_created_dt"] if c in d.columns])
     return d.reset_index(drop=True)
 
@@ -121,21 +123,23 @@ def _render_recent_logs(st, df: pd.DataFrame) -> None:
     st.markdown("## 直近のメモ")
 
     if df is None or df.empty:
-        st.info("まだ練習後メモはありません。")
+        st.info("まだメモはありません。")
         return
 
     d = _sort_logs(df).head(10)
 
     for _, row in d.iterrows():
         log_date = _html(row.get("date"), "—")
-        created_at = _html(row.get("created_at"), "")
-        training = _html(row.get("training_text"), "")
-        match = _html(row.get("match_text"), "")
-        self_training = _html(row.get("self_training_text"), "")
-        study = _html(row.get("study_text"), "")
+        created_at = _txt(row.get("created_at"), "")
+
+        training = _txt(row.get("training_text"), "")
+        match = _txt(row.get("match_text"), "")
+        self_training = _txt(row.get("self_training_text"), "")
+        study = _txt(row.get("study_text"), "")
 
         with st.container(border=True):
             st.markdown(f"### {log_date}")
+
             if created_at:
                 st.caption(f"保存：{created_at}")
 
@@ -157,16 +161,14 @@ def _render_recent_logs(st, df: pd.DataFrame) -> None:
 
 
 def render_practice_log(st, storage) -> None:
-    st.header("練習後メモ")
+    st.header("📝 練習/試合後メモ")
 
     if not hasattr(storage, "supports_practice_log") or not storage.supports_practice_log():
         st.error("現在のstorageでは Practice_Log 機能が利用できません。")
         return
 
     ok, msg = storage.practice_log_healthcheck()
-    if ok:
-        st.success(msg)
-    else:
+    if not ok:
         st.error(msg)
         st.info("Google Sheetsに Practice_Log シートを作り、指定ヘッダーを1行目に貼り付けてください。")
         return
@@ -177,7 +179,7 @@ def render_practice_log(st, storage) -> None:
 
     if st.session_state.pop("practice_log_clear_after_save", False):
         _clear_input_boxes(st)
-        st.success("練習後メモを保存しました。")
+        st.success("メモを保存しました。")
 
     st.divider()
 
@@ -223,7 +225,7 @@ def render_practice_log(st, storage) -> None:
 
     st.divider()
 
-    if st.button("練習後メモを保存", type="primary", use_container_width=True):
+    if st.button("メモを保存", type="primary", use_container_width=True):
         training_text = str(training_text).strip()
         match_text = str(match_text).strip()
         self_training_text = str(self_training_text).strip()
@@ -260,7 +262,7 @@ def render_practice_log(st, storage) -> None:
     try:
         df_logs = storage.load_all_practice_log()
     except Exception as e:
-        st.error(f"練習後メモの読み込みに失敗しました：{e}")
+        st.error(f"メモの読み込みに失敗しました：{e}")
         return
 
     _render_recent_logs(st, df_logs)
