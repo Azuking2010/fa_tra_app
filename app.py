@@ -29,8 +29,11 @@ from modules.report.ui_report import render_report
 # ★IDPページ
 from modules.ui_idp import render_idp
 
-# ★練習後メモページ
+# ★練習/試合後メモページ
 from modules.ui_practice_log import render_practice_log
+
+# ★Trainer Reviewページ
+from modules.ui_pep_review import render_pep_review
 
 
 # ======================
@@ -58,7 +61,7 @@ SHOW_LEGACY_PAGES = False
 SHOW_DEBUG_INFO = False
 
 st.set_page_config(
-    page_title="Road to Ballon d'Or",
+    page_title=APP_TITLE,
     page_icon=APP_ICON,
     layout="centered",
 )
@@ -572,6 +575,7 @@ def render_portfolio_fixed(st, storage):
 storage = build_storage(st)
 train_df = load_training_list()
 
+
 # ======================
 # ★互換パッチ：親ビューが要求する load_all_records を storage に付与
 # ======================
@@ -597,39 +601,11 @@ _attach_load_all_records_compat(storage)
 
 
 # ======================
-# UI helper
-# ======================
-def _render_trainer_review_placeholder(st) -> None:
-    """
-    Trainer Reviewページの仮表示。
-    本実装では modules/ui_pep_review.py を作成し、
-    IDP_Review の review_type=monthly_summary / status=active を表示する。
-    """
-    st.header("🏋️ Trainer Review")
-    st.caption("直近2回の振り返りと次の1つ")
-
-    with st.container(border=True):
-        st.markdown("### 近日追加予定")
-        st.write(
-            "この画面には、IDP_Review に保存した Pepサマリーを表示します。"
-            "直近2回は常時表示し、過去分は月選択で確認できる形にします。"
-        )
-        st.markdown(
-            """
-- 表示対象：`review_type = monthly_summary` かつ `status = active`
-- 表示内容：レビュータイトル / 対象期間 / 本文 / 次の1つ / 軽い記録カウント
-- 運用：月2回、前半・後半で作成
-"""
-        )
-
-
-# ======================
 # UI
 # ======================
 st.title(APP_TITLE_WITH_ICON)
 st.caption(APP_SUBTITLE)
 
-# サイドバー：本人向けページだけを表示
 with st.sidebar:
     page_options = [PAGE_RECORD, PAGE_REVIEW, PAGE_IDP]
 
@@ -675,7 +651,7 @@ if page == PAGE_RECORD:
     st.stop()
 
 if page == PAGE_REVIEW:
-    _render_trainer_review_placeholder(st)
+    render_pep_review(st, storage)
     st.stop()
 
 if page == PAGE_IDP:
@@ -698,6 +674,7 @@ if page != LEGACY_PAGE_TRAINING:
     st.error("ページが見つかりません。")
     st.stop()
 
+
 # ここから先は従来の「トレーニング」ページ
 parent_view = st.toggle("親ビュー（集計）", value=False)
 
@@ -713,16 +690,10 @@ with st.expander("共通ルール（必読）", expanded=True):
     for r in COMMON_RULES:
         st.write(f"・{r}")
 
-# ======================
-# 毎日（共通）
-# ======================
 render_daily(st, storage, selected_date, weekday_key)
 
 st.divider()
 
-# ======================
-# OFF or DAYトレ
-# ======================
 if day_key == "OFF":
     render_box_breath_ui(st, key_prefix=f"box_{selected_date}_OFF")
     st.divider()
@@ -733,9 +704,6 @@ else:
     st.divider()
     render_weight(st, storage, selected_date, weekday_key)
 
-# ======================
-# 親ビュー（集計）
-# ======================
 if parent_view:
     st.divider()
     render_parent_view(st, storage)
