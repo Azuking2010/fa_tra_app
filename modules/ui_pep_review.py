@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from html import escape
 from typing import Any
 
@@ -122,12 +123,33 @@ def _inject_review_css(st) -> None:
     margin: 4px 0 18px 0;
 }
 
-.pep-review-body {
-    font-size: 17px;
+.pep-review-body-list {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin-top: 10px;
+}
+
+.pep-review-body-card {
+    background: #fbfeff;
+    border: 1.5px solid #b9e6ef;
+    border-radius: 14px;
+    padding: 15px 16px;
+}
+
+.pep-review-body-heading {
+    color: #063849;
+    font-size: 20px;
+    font-weight: 900;
+    margin-bottom: 8px;
+    line-height: 1.4;
+}
+
+.pep-review-body-text {
+    font-size: 16px;
     color: #123f4c;
-    line-height: 1.9;
+    line-height: 1.85;
     white-space: pre-wrap;
-    margin-top: 8px;
 }
 
 .pep-review-next {
@@ -166,7 +188,24 @@ def _inject_review_css(st) -> None:
 .pep-review-counts-label {
     color: #0aa7c8;
     font-weight: 900;
-    margin-bottom: 4px;
+    margin-bottom: 8px;
+}
+
+.pep-review-count-chip-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.pep-review-count-chip {
+    display: inline-block;
+    background: #ffffff;
+    border: 1px solid #b9e6ef;
+    border-radius: 999px;
+    padding: 6px 11px;
+    color: #24505d;
+    font-size: 14px;
+    font-weight: 700;
 }
 
 .pep-review-empty {
@@ -196,7 +235,11 @@ def _inject_review_css(st) -> None:
         font-size: 22px;
     }
 
-    .pep-review-body {
+    .pep-review-body-heading {
+        font-size: 19px;
+    }
+
+    .pep-review-body-text {
         font-size: 16px;
     }
 
@@ -317,13 +360,67 @@ def _period_label(row: pd.Series) -> str:
     return "対象期間未設定"
 
 
+def _split_review_body_sections(body: str) -> list[dict[str, str]]:
+    """
+    review_bodyを「◆見出し」単位で分割する。
+    例：
+        ◆今回の結論
+        本文...
+        ◆良かったこと
+        本文...
+    """
+    text = _txt(body, "")
+    if not text:
+        return []
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    if "◆" not in text:
+        return [{"heading": "レビュー", "body": text}]
+
+    parts = re.split(r"(?=◆)", text)
+    sections: list[dict[str, str]] = []
+
+    for part in parts:
+        block = part.strip()
+        if not block:
+            continue
+
+        lines = block.split("\n")
+        heading = lines[0].strip()
+        content = "\n".join(lines[1:]).strip()
+
+        if heading.startswith("◆"):
+            sections.append({"heading": heading, "body": content})
+        else:
+            sections.append({"heading": "レビュー", "body": block})
+
+    return sections
+
+
+def _split_light_counts(value: str) -> list[str]:
+    text = _txt(value, "")
+    if not text:
+        return []
+
+    raw_items = text.split("/")
+    items = []
+
+    for item in raw_items:
+        cleaned = item.strip()
+        if cleaned:
+            items.append(cleaned)
+
+    return items
+
+
 def _render_hero(st) -> None:
     st.markdown(
         """
 <div class="pep-review-hero">
   <div class="pep-review-hero-title">🏋️ Trainer Review</div>
   <div class="pep-review-hero-sub">
-    Pepからの振り返りです。直近2回のレビューを確認し、次に意識することを1つに絞ります。
+    専属トレーナーからの振り返りです。良かったこと、次の課題、次に意識することを確認します。
   </div>
 </div>
 """,
@@ -331,12 +428,69 @@ def _render_hero(st) -> None:
     )
 
 
+def _review_body_html(body: str) -> str:
+    sections = _split_review_body_sections(body)
+
+    if not sections:
+        return """
+<div class="pep-review-body-list">
+  <div class="pep-review-body-card">
+    <div class="pep-review-body-heading">レビュー</div>
+    <div class="pep-review-body-text">レビュー本文が未入力です。</div>
+  </div>
+</div>
+"""
+
+    cards = []
+
+    for section in sections:
+        heading = escape(section.get("heading", "レビュー"))
+        content = escape(section.get("body", ""))
+
+        if not content:
+            content = "—"
+
+        cards.append(
+            f"""
+<div class="pep-review-body-card">
+  <div class="pep-review-body-heading">{heading}</div>
+  <div class="pep-review-body-text">{content}</div>
+</div>
+"""
+        )
+
+    return f"""
+<div class="pep-review-body-list">
+  {''.join(cards)}
+</div>
+"""
+
+
+def _light_counts_html(light_counts: str) -> str:
+    items = _split_light_counts(light_counts)
+
+    if not items:
+        return ""
+
+    chips = "".join(
+        f'<span class="pep-review-count-chip">{escape(item)}</span>'
+        for item in items
+    )
+
+    return f"""
+<div class="pep-review-counts">
+  <div class="pep-review-counts-label">サマリー</div>
+  <div class="pep-review-count-chip-list">{chips}</div>
+</div>
+"""
+
+
 def _render_review_card(st, row: pd.Series, recent: bool = False) -> None:
     title = _html(row.get("review_title"), "Trainer Review")
     period = escape(_period_label(row))
-    body = _html(row.get("review_body"), "")
+    body = _txt(row.get("review_body"), "")
     next_one = _html(row.get("next_one"), "")
-    light_counts = _html(row.get("light_counts"), "")
+    light_counts = _txt(row.get("light_counts"), "")
 
     card_class = "pep-review-card recent" if recent else "pep-review-card"
 
@@ -349,24 +503,15 @@ def _render_review_card(st, row: pd.Series, recent: bool = False) -> None:
 </div>
 """
 
-    counts_html = ""
-    if light_counts:
-        counts_html = f"""
-<div class="pep-review-counts">
-  <div class="pep-review-counts-label">記録カウント</div>
-  <div>{light_counts}</div>
-</div>
-"""
-
-    if not body:
-        body = "レビュー本文が未入力です。"
+    counts_html = _light_counts_html(light_counts)
+    body_html = _review_body_html(body)
 
     st.markdown(
         f"""
 <div class="{card_class}">
   <div class="pep-review-title">{title}</div>
   <div class="pep-review-period">{period}</div>
-  <div class="pep-review-body">{body}</div>
+  {body_html}
   {next_html}
   {counts_html}
 </div>
@@ -392,8 +537,6 @@ def _render_recent_reviews(st, df_reviews: pd.DataFrame) -> pd.DataFrame:
 
 
 def _render_archive_reviews(st, older_reviews: pd.DataFrame) -> None:
-    st.markdown('<div class="pep-review-section-title">過去のレビュー</div>', unsafe_allow_html=True)
-
     if older_reviews is None or older_reviews.empty:
         st.caption("過去レビューはまだありません。")
         return
