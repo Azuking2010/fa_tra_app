@@ -7,11 +7,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 import os
-import pandas as pd
 
-# gspread / google auth
+import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+
 
 # =========================
 # Log schema (training log)
@@ -25,6 +25,7 @@ RECORD_COLUMNS = [
     "done",
     "weight",
 ]
+
 
 # =========================
 # Portfolio schema
@@ -53,8 +54,9 @@ PORTFOLIO_COLUMNS = [
     "note",
 ]
 
+
 # =========================
-# Roadmap schema (future targets)
+# Roadmap schema
 # =========================
 ROADMAP_COLUMNS = [
     "start_ym",
@@ -65,6 +67,7 @@ ROADMAP_COLUMNS = [
     "max_value",
     "note",
 ]
+
 
 # =========================
 # IDP schema
@@ -132,31 +135,46 @@ IDP_ACTION_PLAN_COLUMNS = [
     "updated_at",
 ]
 
+# Review仕様FIX版
+# detail / achievement / reflection / monthly_summary を同一シートで扱う。
+# App表示対象は review_type = monthly_summary かつ status = active。
 IDP_REVIEW_COLUMNS = [
     "review_id",
     "review_month",
     "review_date",
+    "review_type",
+    "period_start",
+    "period_end",
+    "source_type",
+    "source_ids",
     "related_goal_id",
     "related_action_id",
     "theme",
     "category",
+    "theme_tags",
     "priority",
-    "execution_score",
-    "awareness_score",
-    "change_score",
-    "overall_score",
-    "continue_decision",
-    "next_priority",
+    "achievement_type",
+    "achievement_value",
+    "match_context",
+    "review_title",
+    "review_body",
+    "next_one",
+    "light_counts",
     "good_point",
     "issue",
     "next_action",
     "evidence_text",
     "parent_comment",
     "pep_comment",
+    "status",
     "created_at",
     "updated_at",
 ]
 
+
+# =========================
+# Other schemas
+# =========================
 TRAINING_NOTICE_MASTER_COLUMNS = [
     "notice_id",
     "week_no",
@@ -197,9 +215,6 @@ DAILY_SCHEDULE_COLUMNS = [
     "updated_at",
 ]
 
-# =========================
-# Practice Log schema
-# =========================
 PRACTICE_LOG_COLUMNS = [
     "log_id",
     "date",
@@ -211,6 +226,17 @@ PRACTICE_LOG_COLUMNS = [
     "created_at",
     "updated_at",
 ]
+
+
+# =========================
+# Helpers
+# =========================
+def _to_numeric_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    d = df.copy()
+    for c in columns:
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+    return d
 
 
 # =========================
@@ -325,6 +351,7 @@ class SheetsStorage(BaseStorage):
     idp_player_profile_worksheet_name: str = "IDP_PlayerProfile"
     idp_action_plan_worksheet_name: str = "IDP_ActionPlan"
     idp_review_worksheet_name: str = "IDP_Review"
+
     training_notice_master_worksheet_name: str = "Training_Notice_Master"
     daily_schedule_worksheet_name: str = "Daily_Schedule"
     practice_log_worksheet_name: str = "Practice_Log"
@@ -336,7 +363,6 @@ class SheetsStorage(BaseStorage):
             return self._client
 
         sa_info = self.st.secrets["gcp_service_account"]
-
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
@@ -353,6 +379,7 @@ class SheetsStorage(BaseStorage):
     def _load_sheet_as_df(self, worksheet_name: str, columns: List[str]) -> pd.DataFrame:
         ws = self._open_ws(worksheet_name)
         values = ws.get_all_values()
+
         if not values or len(values) < 2:
             return pd.DataFrame(columns=columns)
 
@@ -369,11 +396,13 @@ class SheetsStorage(BaseStorage):
     def _append_row_generic(self, worksheet_name: str, columns: List[str], row: Dict[str, Any]) -> None:
         ws = self._open_ws(worksheet_name)
         header = ws.row_values(1)
+
         if not header:
             ws.append_row(columns)
             header = columns
 
         cols = list(header)
+
         for k in row.keys():
             if k not in cols:
                 cols.append(k)
@@ -381,10 +410,7 @@ class SheetsStorage(BaseStorage):
         if cols != header:
             ws.update("A1", [cols])
 
-        out = []
-        for c in cols:
-            out.append(row.get(c, ""))
-
+        out = [row.get(c, "") for c in cols]
         ws.append_row(out, value_input_option="USER_ENTERED")
 
     def get_info(self) -> Dict[str, Any]:
@@ -416,8 +442,10 @@ class SheetsStorage(BaseStorage):
     def append_records(self, rows: List[Dict[str, Any]]) -> None:
         if not rows:
             return
+
         ws = self._open_ws(self.worksheet_name)
         header = ws.row_values(1)
+
         if not header:
             ws.append_row(RECORD_COLUMNS)
 
@@ -425,24 +453,12 @@ class SheetsStorage(BaseStorage):
         for c in RECORD_COLUMNS:
             if c not in df.columns:
                 df[c] = ""
-        df = df[RECORD_COLUMNS]
 
-        values = df.values.tolist()
-        ws.append_rows(values, value_input_option="USER_ENTERED")
+        df = df[RECORD_COLUMNS]
+        ws.append_rows(df.values.tolist(), value_input_option="USER_ENTERED")
 
     def load_records(self) -> pd.DataFrame:
-        ws = self._open_ws(self.worksheet_name)
-        values = ws.get_all_values()
-        if not values or len(values) < 2:
-            return pd.DataFrame(columns=RECORD_COLUMNS)
-
-        header = values[0]
-        rows = values[1:]
-        df = pd.DataFrame(rows, columns=header)
-        for c in RECORD_COLUMNS:
-            if c not in df.columns:
-                df[c] = ""
-        return df[RECORD_COLUMNS]
+        return self._load_sheet_as_df(self.worksheet_name, RECORD_COLUMNS)
 
     def load_all_records(self) -> pd.DataFrame:
         return self.load_records()
@@ -464,16 +480,24 @@ class SheetsStorage(BaseStorage):
 
     def load_all_portfolio(self) -> pd.DataFrame:
         df = self._load_sheet_as_df(self.portfolio_worksheet_name, PORTFOLIO_COLUMNS)
-
-        num_cols = [
-            "height_cm", "weight_kg", "run_100m_sec", "run_1500m_sec", "run_3000m_sec",
-            "rank", "deviation", "rating", "score_jp", "score_math", "score_en", "score_sci", "score_soc",
-        ]
-        for c in num_cols:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-
-        return df
+        return _to_numeric_columns(
+            df,
+            [
+                "height_cm",
+                "weight_kg",
+                "run_100m_sec",
+                "run_1500m_sec",
+                "run_3000m_sec",
+                "rank",
+                "deviation",
+                "rating",
+                "score_jp",
+                "score_math",
+                "score_en",
+                "score_sci",
+                "score_soc",
+            ],
+        )
 
     # ----- roadmap -----
     def supports_roadmap(self) -> bool:
@@ -489,11 +513,7 @@ class SheetsStorage(BaseStorage):
 
     def load_all_roadmap(self) -> pd.DataFrame:
         df = self._load_sheet_as_df(self.roadmap_worksheet_name, ROADMAP_COLUMNS)
-
-        for c in ["min_value", "max_value"]:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-
+        df = _to_numeric_columns(df, ["min_value", "max_value"])
         return df.reset_index(drop=True)
 
     def append_roadmap_row(self, row: Dict[str, Any]) -> None:
@@ -525,14 +545,12 @@ class SheetsStorage(BaseStorage):
 
         if ng_names:
             return False, f"IDP Sheets 一部NG: {', '.join(ng_names)}"
+
         return True, f"IDP Sheets OK: {', '.join(ok_names)}"
 
     def load_all_idp_profile(self) -> pd.DataFrame:
         df = self._load_sheet_as_df(self.idp_profile_worksheet_name, IDP_PROFILE_COLUMNS)
-        for c in ["height_cm", "weight_kg"]:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-        return df
+        return _to_numeric_columns(df, ["height_cm", "weight_kg"])
 
     def load_all_idp_goals(self) -> pd.DataFrame:
         return self._load_sheet_as_df(self.idp_goals_worksheet_name, IDP_GOALS_COLUMNS)
@@ -551,7 +569,10 @@ class SheetsStorage(BaseStorage):
         return True
 
     def load_all_training_notice_master(self) -> pd.DataFrame:
-        return self._load_sheet_as_df(self.training_notice_master_worksheet_name, TRAINING_NOTICE_MASTER_COLUMNS)
+        return self._load_sheet_as_df(
+            self.training_notice_master_worksheet_name,
+            TRAINING_NOTICE_MASTER_COLUMNS,
+        )
 
     # ----- Daily Schedule -----
     def supports_daily_schedule(self) -> bool:
@@ -559,12 +580,7 @@ class SheetsStorage(BaseStorage):
 
     def load_all_daily_schedule(self) -> pd.DataFrame:
         df = self._load_sheet_as_df(self.daily_schedule_worksheet_name, DAILY_SCHEDULE_COLUMNS)
-
-        for c in ["base_score", "quality_bonus", "total_score"]:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-
-        return df
+        return _to_numeric_columns(df, ["base_score", "quality_bonus", "total_score"])
 
     # ----- Practice Log -----
     def supports_practice_log(self) -> bool:
@@ -599,6 +615,7 @@ class CSVStorage(BaseStorage):
     idp_player_profile_path: str = "idp_player_profile.csv"
     idp_action_plan_path: str = "idp_action_plan.csv"
     idp_review_path: str = "idp_review.csv"
+
     training_notice_master_path: str = "training_notice_master.csv"
     daily_schedule_path: str = "daily_schedule.csv"
     practice_log_path: str = "practice_log.csv"
@@ -606,6 +623,7 @@ class CSVStorage(BaseStorage):
     def _load_csv_as_df(self, path: str, columns: List[str]) -> pd.DataFrame:
         if not os.path.exists(path):
             return pd.DataFrame(columns=columns)
+
         try:
             df = pd.read_csv(path)
         except Exception:
@@ -619,6 +637,7 @@ class CSVStorage(BaseStorage):
 
     def _append_csv_row(self, path: str, columns: List[str], row: Dict[str, Any]) -> None:
         df_new = pd.DataFrame([row])
+
         if os.path.exists(path):
             df_old = pd.read_csv(path)
             df = pd.concat([df_old, df_new], ignore_index=True)
@@ -631,7 +650,7 @@ class CSVStorage(BaseStorage):
 
         df.to_csv(path, index=False)
 
-    # ===== log =====
+    # ----- training log -----
     def healthcheck(self) -> Tuple[bool, str]:
         if not os.path.exists(self.path):
             return True, f"CSV未作成: {self.path}（初回保存で自動作成されます）"
@@ -640,7 +659,9 @@ class CSVStorage(BaseStorage):
     def append_records(self, rows: List[Dict[str, Any]]) -> None:
         if not rows:
             return
+
         df_new = pd.DataFrame(rows)
+
         if os.path.exists(self.path):
             df_old = pd.read_csv(self.path)
             df = pd.concat([df_old, df_new], ignore_index=True)
@@ -650,6 +671,7 @@ class CSVStorage(BaseStorage):
         for c in RECORD_COLUMNS:
             if c not in df.columns:
                 df[c] = ""
+
         df = df[RECORD_COLUMNS]
         df.to_csv(self.path, index=False)
 
@@ -659,7 +681,7 @@ class CSVStorage(BaseStorage):
     def load_all_records(self) -> pd.DataFrame:
         return self.load_records()
 
-    # ===== portfolio =====
+    # ----- portfolio -----
     def supports_portfolio(self) -> bool:
         return True
 
@@ -673,18 +695,26 @@ class CSVStorage(BaseStorage):
 
     def load_all_portfolio(self) -> pd.DataFrame:
         df = self._load_csv_as_df(self.portfolio_path, PORTFOLIO_COLUMNS)
+        return _to_numeric_columns(
+            df,
+            [
+                "height_cm",
+                "weight_kg",
+                "run_100m_sec",
+                "run_1500m_sec",
+                "run_3000m_sec",
+                "rank",
+                "deviation",
+                "rating",
+                "score_jp",
+                "score_math",
+                "score_en",
+                "score_sci",
+                "score_soc",
+            ],
+        )
 
-        num_cols = [
-            "height_cm", "weight_kg", "run_100m_sec", "run_1500m_sec", "run_3000m_sec",
-            "rank", "deviation", "rating", "score_jp", "score_math", "score_en", "score_sci", "score_soc",
-        ]
-        for c in num_cols:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-
-        return df
-
-    # ===== roadmap =====
+    # ----- roadmap -----
     def supports_roadmap(self) -> bool:
         return True
 
@@ -695,17 +725,13 @@ class CSVStorage(BaseStorage):
 
     def load_all_roadmap(self) -> pd.DataFrame:
         df = self._load_csv_as_df(self.roadmap_path, ROADMAP_COLUMNS)
-
-        for c in ["min_value", "max_value"]:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-
+        df = _to_numeric_columns(df, ["min_value", "max_value"])
         return df.reset_index(drop=True)
 
     def append_roadmap_row(self, row: Dict[str, Any]) -> None:
         self._append_csv_row(self.roadmap_path, ROADMAP_COLUMNS, row)
 
-    # ===== IDP =====
+    # ----- IDP -----
     def supports_idp(self) -> bool:
         return True
 
@@ -714,10 +740,7 @@ class CSVStorage(BaseStorage):
 
     def load_all_idp_profile(self) -> pd.DataFrame:
         df = self._load_csv_as_df(self.idp_profile_path, IDP_PROFILE_COLUMNS)
-        for c in ["height_cm", "weight_kg"]:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-        return df
+        return _to_numeric_columns(df, ["height_cm", "weight_kg"])
 
     def load_all_idp_goals(self) -> pd.DataFrame:
         return self._load_csv_as_df(self.idp_goals_path, IDP_GOALS_COLUMNS)
@@ -731,25 +754,25 @@ class CSVStorage(BaseStorage):
     def load_all_idp_review(self) -> pd.DataFrame:
         return self._load_csv_as_df(self.idp_review_path, IDP_REVIEW_COLUMNS)
 
-    # ===== Training Notice =====
+    # ----- Training Notice -----
     def supports_training_notice(self) -> bool:
         return True
 
     def load_all_training_notice_master(self) -> pd.DataFrame:
-        return self._load_csv_as_df(self.training_notice_master_path, TRAINING_NOTICE_MASTER_COLUMNS)
+        return self._load_csv_as_df(
+            self.training_notice_master_path,
+            TRAINING_NOTICE_MASTER_COLUMNS,
+        )
 
-    # ===== Daily Schedule =====
+    # ----- Daily Schedule -----
     def supports_daily_schedule(self) -> bool:
         return True
 
     def load_all_daily_schedule(self) -> pd.DataFrame:
         df = self._load_csv_as_df(self.daily_schedule_path, DAILY_SCHEDULE_COLUMNS)
-        for c in ["base_score", "quality_bonus", "total_score"]:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-        return df
+        return _to_numeric_columns(df, ["base_score", "quality_bonus", "total_score"])
 
-    # ===== Practice Log =====
+    # ----- Practice Log -----
     def supports_practice_log(self) -> bool:
         return True
 
@@ -770,12 +793,12 @@ class CSVStorage(BaseStorage):
 # =========================
 def build_storage(st) -> BaseStorage:
     """
-    secrets が揃ってたら Sheets。
+    secrets が揃っていたら Sheets。
     無ければ CSV（ローカル動作用）にフォールバック。
 
-    ✅ 壊さない原則（互換性）
-    - spreadsheet_id のキー名揺れに対応（例: spreadsheet_id / spreadsheetId / sheet_id / gsheet_id など）
-    - spreadsheet_id が取得できるなら Sheets を優先（CSVへ落とさない）
+    壊さない原則：
+    - spreadsheet_id のキー名揺れに対応
+    - spreadsheet_id が取得できるなら Sheets を優先
     - CSV fallback のログCSV名も固定せず、既存ファイルを優先
     """
 
@@ -789,6 +812,7 @@ def build_storage(st) -> BaseStorage:
             "gsheetId",
             "SPREADSHEET_ID",
         ]
+
         for k in candidates:
             try:
                 if k in st.secrets:
@@ -799,6 +823,7 @@ def build_storage(st) -> BaseStorage:
                 continue
 
         section_candidates = ["app", "settings", "config"]
+
         for sec in section_candidates:
             try:
                 obj = st.secrets.get(sec, None)
@@ -824,6 +849,7 @@ def build_storage(st) -> BaseStorage:
     try:
         if "gcp_service_account" in st.secrets:
             spreadsheet_id = _pick_spreadsheet_id()
+
             worksheet = str(st.secrets.get("worksheet", "log")).strip()
             portfolio_ws = str(st.secrets.get("portfolio_worksheet", "portfolio")).strip()
             roadmap_ws = str(st.secrets.get("roadmap_worksheet", "ROADMAP")).strip()
@@ -833,7 +859,10 @@ def build_storage(st) -> BaseStorage:
             idp_player_profile_ws = str(st.secrets.get("idp_player_profile_worksheet", "IDP_PlayerProfile")).strip()
             idp_action_plan_ws = str(st.secrets.get("idp_action_plan_worksheet", "IDP_ActionPlan")).strip()
             idp_review_ws = str(st.secrets.get("idp_review_worksheet", "IDP_Review")).strip()
-            training_notice_master_ws = str(st.secrets.get("training_notice_master_worksheet", "Training_Notice_Master")).strip()
+
+            training_notice_master_ws = str(
+                st.secrets.get("training_notice_master_worksheet", "Training_Notice_Master")
+            ).strip()
             daily_schedule_ws = str(st.secrets.get("daily_schedule_worksheet", "Daily_Schedule")).strip()
             practice_log_ws = str(st.secrets.get("practice_log_worksheet", "Practice_Log")).strip()
 
@@ -856,4 +885,8 @@ def build_storage(st) -> BaseStorage:
     except Exception:
         pass
 
-    return CSVStorage(path=_pick_csv_path(), portfolio_path="portfolio.csv", roadmap_path="roadmap.csv")
+    return CSVStorage(
+        path=_pick_csv_path(),
+        portfolio_path="portfolio.csv",
+        roadmap_path="roadmap.csv",
+    )
