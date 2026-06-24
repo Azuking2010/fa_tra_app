@@ -342,7 +342,13 @@ def _prepare_reviews(df: pd.DataFrame) -> pd.DataFrame:
         na_position="last",
     )
 
-    d = d.drop(columns=[c for c in ["_period_end_dt", "_review_date_dt", "_updated_at_dt"] if c in d.columns])
+    d = d.drop(
+        columns=[
+            c
+            for c in ["_period_end_dt", "_review_date_dt", "_updated_at_dt"]
+            if c in d.columns
+        ]
+    )
     return d.reset_index(drop=True)
 
 
@@ -399,12 +405,27 @@ def _split_review_body_sections(body: str) -> list[dict[str, str]]:
 
 
 def _split_light_counts(value: str) -> list[str]:
+    """
+    light_countsをサマリー項目ごとに分割する。
+
+    重要：
+    単純に "/" で分割すると、日付表記の "6/23" まで分割されてしまう。
+    そのため、項目区切りとして使う「スペース付きの / 」だけを分割対象にする。
+
+    例：
+        "Practice_Log 実質3件（6/23は重複保存2行を1件扱い） / U14公式戦 2試合"
+        ↓
+        [
+          "Practice_Log 実質3件（6/23は重複保存2行を1件扱い）",
+          "U14公式戦 2試合",
+        ]
+    """
     text = _txt(value, "")
     if not text:
         return []
 
-    raw_items = text.split("/")
-    items = []
+    raw_items = re.split(r"\s+/\s+", text)
+    items: list[str] = []
 
     for item in raw_items:
         cleaned = item.strip()
@@ -521,7 +542,10 @@ def _render_review_card(st, row: pd.Series, recent: bool = False) -> None:
 
 
 def _render_recent_reviews(st, df_reviews: pd.DataFrame) -> pd.DataFrame:
-    st.markdown('<div class="pep-review-section-title">直近のレビュー</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="pep-review-section-title">直近のレビュー</div>',
+        unsafe_allow_html=True,
+    )
 
     if df_reviews is None or df_reviews.empty:
         st.info("表示できるTrainer Reviewはまだありません。")
