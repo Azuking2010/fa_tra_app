@@ -39,8 +39,26 @@ from modules.ui_practice_log import render_practice_log
 APP_ICON_PATH = Path("assets/icon/pep_icon_bobblehead.png")
 APP_ICON = str(APP_ICON_PATH) if APP_ICON_PATH.exists() else "⚽"
 
+APP_TITLE = "Road to Ballon d'Or"
+APP_TITLE_WITH_ICON = "🏆 Road to Ballon d'Or"
+APP_SUBTITLE = "記録・レビュー・IDP"
+
+PAGE_RECORD = "📝 記録"
+PAGE_REVIEW = "🏋️ レビュー"
+PAGE_IDP = "🗺️ IDP"
+
+LEGACY_PAGE_TRAINING = "旧：トレーニング"
+LEGACY_PAGE_PORTFOLIO = "旧：ポートフォリオ"
+LEGACY_PAGE_ROADMAP = "旧：ROADMAP"
+LEGACY_PAGE_REPORT = "旧：レポート"
+
+# 本人向けUIでは旧ページ・デバッグ情報を出さない。
+# 必要な場合だけローカルで True に変更して確認する。
+SHOW_LEGACY_PAGES = False
+SHOW_DEBUG_INFO = False
+
 st.set_page_config(
-    page_title="FA期間 自主トレチェック",
+    page_title="Road to Ballon d'Or",
     page_icon=APP_ICON,
     layout="centered",
 )
@@ -579,64 +597,105 @@ _attach_load_all_records_compat(storage)
 
 
 # ======================
+# UI helper
+# ======================
+def _render_trainer_review_placeholder(st) -> None:
+    """
+    Trainer Reviewページの仮表示。
+    本実装では modules/ui_pep_review.py を作成し、
+    IDP_Review の review_type=monthly_summary / status=active を表示する。
+    """
+    st.header("🏋️ Trainer Review")
+    st.caption("直近2回の振り返りと次の1つ")
+
+    with st.container(border=True):
+        st.markdown("### 近日追加予定")
+        st.write(
+            "この画面には、IDP_Review に保存した Pepサマリーを表示します。"
+            "直近2回は常時表示し、過去分は月選択で確認できる形にします。"
+        )
+        st.markdown(
+            """
+- 表示対象：`review_type = monthly_summary` かつ `status = active`
+- 表示内容：レビュータイトル / 対象期間 / 本文 / 次の1つ / 軽い記録カウント
+- 運用：月2回、前半・後半で作成
+"""
+        )
+
+
+# ======================
 # UI
 # ======================
-st.title("FA期間 自主トレチェック")
+st.title(APP_TITLE_WITH_ICON)
+st.caption(APP_SUBTITLE)
 
-# サイドバー：接続状態など
+# サイドバー：本人向けページだけを表示
 with st.sidebar:
-    st.header("設定 / 状態")
-    ok, msg = storage.healthcheck()
-    if ok:
-        st.success(msg)
-    else:
-        st.error(msg)
+    page_options = [PAGE_RECORD, PAGE_REVIEW, PAGE_IDP]
 
-    info = storage.get_info()
-    if info:
-        if "spreadsheet_id" in info:
-            st.caption(f"spreadsheet_id:\n{info['spreadsheet_id']}")
-        if "worksheet" in info:
-            st.caption(f"worksheet: {info['worksheet']}")
-        if "portfolio_worksheet" in info:
-            st.caption(f"portfolio_worksheet: {info['portfolio_worksheet']}")
-        if "roadmap_worksheet" in info:
-            st.caption(f"roadmap_worksheet: {info['roadmap_worksheet']}")
-        if "idp_profile_worksheet" in info:
-            st.caption(f"IDP: {info['idp_profile_worksheet']} / {info.get('idp_review_worksheet', 'IDP_Review')}")
-        if "practice_log_worksheet" in info:
-            st.caption(f"Practice_Log: {info['practice_log_worksheet']}")
+    if SHOW_LEGACY_PAGES:
+        page_options.extend(
+            [
+                LEGACY_PAGE_TRAINING,
+                LEGACY_PAGE_PORTFOLIO,
+                LEGACY_PAGE_ROADMAP,
+                LEGACY_PAGE_REPORT,
+            ]
+        )
 
-    st.divider()
-    st.caption("ページ")
     page = st.radio(
         "ページ",
-        ["トレーニング", "練習後メモ", "IDP", "ポートフォリオ", "ROADMAP", "レポート"],
+        page_options,
         index=0,
         label_visibility="collapsed",
     )
 
+    if SHOW_DEBUG_INFO:
+        st.divider()
+        st.caption("Debug / Storage")
+
+        ok, msg = storage.healthcheck()
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
+
+        info = storage.get_info()
+        if info:
+            with st.expander("Storage info", expanded=False):
+                for k, v in info.items():
+                    st.caption(f"{k}: {v}")
+
+
 # ======================
 # ページ切替
 # ======================
-if page == "練習後メモ":
+if page == PAGE_RECORD:
     render_practice_log(st, storage)
     st.stop()
 
-if page == "IDP":
+if page == PAGE_REVIEW:
+    _render_trainer_review_placeholder(st)
+    st.stop()
+
+if page == PAGE_IDP:
     render_idp(st, storage)
     st.stop()
 
-if page == "ROADMAP":
+if page == LEGACY_PAGE_ROADMAP:
     render_roadmap(st)
     st.stop()
 
-if page == "レポート":
+if page == LEGACY_PAGE_REPORT:
     render_report(storage)
     st.stop()
 
-if page == "ポートフォリオ":
+if page == LEGACY_PAGE_PORTFOLIO:
     render_portfolio_fixed(st, storage)
+    st.stop()
+
+if page != LEGACY_PAGE_TRAINING:
+    st.error("ページが見つかりません。")
     st.stop()
 
 # ここから先は従来の「トレーニング」ページ
