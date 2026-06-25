@@ -35,6 +35,9 @@ from modules.ui_practice_log import render_practice_log
 # ★Trainer Reviewページ
 from modules.ui_pep_review import render_pep_review
 
+# ★Analyst Reportページ
+from modules.ui_analyst_report import render_analyst_report
+
 
 # ======================
 # ページ設定
@@ -44,11 +47,12 @@ APP_ICON = str(APP_ICON_PATH) if APP_ICON_PATH.exists() else "⚽"
 
 APP_TITLE = "Road to Ballon d'Or"
 APP_TITLE_WITH_ICON = "🏆 Road to Ballon d'Or"
-APP_SUBTITLE = "記録・レビュー・IDP"
+APP_SUBTITLE = "記録・レビュー・IDP・分析"
 
 PAGE_RECORD = "📝 記録"
 PAGE_REVIEW = "🏋️ レビュー"
 PAGE_IDP = "🗺️ IDP"
+PAGE_ANALYSIS = "📊 分析"
 
 LEGACY_PAGE_TRAINING = "旧：トレーニング"
 LEGACY_PAGE_PORTFOLIO = "旧：ポートフォリオ"
@@ -607,7 +611,7 @@ st.title(APP_TITLE_WITH_ICON)
 st.caption(APP_SUBTITLE)
 
 with st.sidebar:
-    page_options = [PAGE_RECORD, PAGE_REVIEW, PAGE_IDP]
+    page_options = [PAGE_RECORD, PAGE_REVIEW, PAGE_IDP, PAGE_ANALYSIS]
 
     if SHOW_LEGACY_PAGES:
         page_options.extend(
@@ -656,6 +660,10 @@ if page == PAGE_REVIEW:
 
 if page == PAGE_IDP:
     render_idp(st, storage)
+    st.stop()
+
+if page == PAGE_ANALYSIS:
+    render_analyst_report(st, storage)
     st.stop()
 
 if page == LEGACY_PAGE_ROADMAP:
