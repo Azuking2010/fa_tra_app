@@ -349,7 +349,7 @@ def _parse_float(value: Any) -> float | None:
 def _parse_seconds(value: Any) -> float | None:
     """
     秒数列用。
-    原則は 275 のような秒入力。
+    原則は 8.12 や 275 のような秒入力。
     誤って 4:35 のように入れても読めるようにする。
     """
     if _is_blank(value):
@@ -507,7 +507,7 @@ def _metric_points_single(df: pd.DataFrame, value_col: str, value_type: str = "f
     return _metric_points(df, [value_col], value_type)
 
 
-def _format_seconds(total_seconds: Any) -> str:
+def _format_mmss(total_seconds: Any) -> str:
     try:
         sec = int(round(float(total_seconds)))
     except Exception:
@@ -519,6 +519,18 @@ def _format_seconds(total_seconds: Any) -> str:
     minutes = sec // 60
     seconds = sec % 60
     return f"{minutes}:{seconds:02d}"
+
+
+def _format_short_seconds(total_seconds: Any) -> str:
+    try:
+        sec = float(total_seconds)
+    except Exception:
+        return "—"
+
+    if sec <= 0:
+        return "—"
+
+    return f"{sec:.2f}秒"
 
 
 def _format_metric_value(value: Any, metric_key: str) -> str:
@@ -533,8 +545,11 @@ def _format_metric_value(value: Any, metric_key: str) -> str:
     if metric_key == "weight":
         return f"{v:.1f} kg"
 
-    if metric_key in ["run_50", "run_1500", "run_3000"]:
-        return _format_seconds(v)
+    if metric_key == "run_50":
+        return _format_short_seconds(v)
+
+    if metric_key in ["run_1500", "run_3000"]:
+        return _format_mmss(v)
 
     if metric_key == "rank":
         return f"{int(round(v))} 位"
@@ -572,7 +587,15 @@ def _format_delta(first_value: Any, latest_value: Any, metric_key: str, count: i
         sign = "+" if diff > 0 else ""
         return f"初回比 {sign}{diff:.1f} kg / 記録{count}件"
 
-    if metric_key in ["run_50", "run_1500", "run_3000"]:
+    if metric_key == "run_50":
+        diff = first - latest
+        if abs(diff) < 0.005:
+            return f"初回比 変化なし / 記録{count}件"
+        if diff > 0:
+            return f"初回比 {diff:.2f}秒短縮 / 記録{count}件"
+        return f"初回比 {abs(diff):.2f}秒増加 / 記録{count}件"
+
+    if metric_key in ["run_1500", "run_3000"]:
         diff = first - latest
         if abs(diff) < 0.5:
             return f"初回比 変化なし / 記録{count}件"
@@ -758,12 +781,19 @@ def _plot_body_chart(st, height_points: pd.DataFrame, weight_points: pd.DataFram
     _show_pyplot(st, fig)
 
 
+def _time_formatter(metric_key: str):
+    if metric_key == "run_50":
+        return FuncFormatter(lambda x, pos: f"{x:.2f}秒")
+    return FuncFormatter(lambda x, pos: _format_mmss(x))
+
+
 def _plot_time_chart(
     st,
     points: pd.DataFrame,
     title: str,
     sub: str,
     color: str,
+    metric_key: str,
 ) -> None:
     _render_chart_title(st, title, sub)
 
@@ -785,7 +815,7 @@ def _plot_time_chart(
 
     ax.set_xlabel("日付")
     ax.set_ylabel("タイム")
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: _format_seconds(x)))
+    ax.yaxis.set_major_formatter(_time_formatter(metric_key))
 
     # 重要：タイムは小さいほど速い。
     # グラフ上では「上がる＝速くなる」にしたいため、y軸を反転する。
@@ -795,7 +825,7 @@ def _plot_time_chart(
 
     latest = points.iloc[-1]
     ax.annotate(
-        _format_seconds(latest["value"]),
+        _format_metric_value(latest["value"], metric_key),
         xy=(latest["_date"], latest["value"]),
         xytext=(8, 8),
         textcoords="offset points",
@@ -1045,9 +1075,10 @@ def _render_input_rule(st) -> None:
         st.markdown(
             """
 - Appからは入力しません。`portfolio` シートに直接追記します。
-- 50mは `run_50m_sec` に秒で入力します。旧列 `run_100m_sec` が残っていても、App側では50mとして読みます。
+- 50mは `run_50m_sec` に秒で入力します。例：`8.12`
+- 旧列 `run_100m_sec` が残っていても、App側では50mとして読みます。
 - 1500m・3000mは、基本は秒で入力します。例：`4:35` → `275`、`9:38` → `578`
-- 誤って `4:35` の形で入っていても、このページでは秒に変換して表示します。
+- 1500m・3000mは、誤って `4:35` の形で入っていても、このページでは秒に変換して表示します。
 - 同じ日に複数行ある場合は、その日の最後の非空値を採用します。
 - count系は `stretch_count`、`scanning_count`、`assist_count` など、末尾が `_count` の列を追加すると自動で集計対象になります。
 """
@@ -1122,6 +1153,7 @@ def render_analyst_report(st, storage) -> None:
         "50m",
         "上がるほど速くなっています。初速・加速力の参考記録として確認します。",
         COLOR_50,
+        "run_50",
     )
 
     _plot_time_chart(
@@ -1130,6 +1162,7 @@ def render_analyst_report(st, storage) -> None:
         "1500m",
         "上がるほど速くなっています。持久力・ペース維持力の確認に使います。",
         COLOR_1500,
+        "run_1500",
     )
 
     _plot_time_chart(
@@ -1138,6 +1171,7 @@ def render_analyst_report(st, storage) -> None:
         "3000m",
         "上がるほど速くなっています。粘り・巡航力・長い距離の安定性を確認します。",
         COLOR_3000,
+        "run_3000",
     )
 
     st.markdown('<div class="analyst-section-title">学業</div>', unsafe_allow_html=True)
