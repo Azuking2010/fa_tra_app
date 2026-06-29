@@ -53,6 +53,7 @@ PAGE_RECORD = "📝 記録"
 PAGE_REVIEW = "🏋️ レビュー"
 PAGE_IDP = "🗺️ IDP"
 PAGE_ANALYSIS = "📊 分析"
+PAGE_NB_CUP = "🏆 NB-CUP"
 
 LEGACY_PAGE_TRAINING = "旧：トレーニング"
 LEGACY_PAGE_PORTFOLIO = "旧：ポートフォリオ"
@@ -336,6 +337,58 @@ def _compute_global_latest_values(dfp_all):
     return latest
 
 
+def _get_secret_text(key: str, fallback: str = "") -> str:
+    """
+    Streamlit Secretsから文字列を安全に取得する。
+    ローカルでsecrets.tomlが無い場合でも落ちないようにする。
+    """
+    try:
+        value = st.secrets.get(key, fallback)
+        return str(value).strip()
+    except Exception:
+        return fallback
+
+
+def render_nb_cup_page(st) -> None:
+    """
+    NB-CUP管理表への軽量リンク導線。
+    入力UIはApp内に作らず、Google Sheets側の保護範囲・自動計算を正本とする。
+    """
+    st.header("🏆 NB-CUP")
+
+    st.markdown("### NB-CUP 管理表")
+
+    st.info(
+        "遠征中に、対戦相手情報・予選スケジュール・星取表を確認するためのページです。"
+    )
+
+    st.markdown(
+        """
+**使い方**
+
+1. 下のボタンからGoogle Sheetsを開く  
+2. 対戦相手情報・予選スケジュール・星取表を確認する  
+3. 試合後は、Sheets上の得点入力セルだけ入力する  
+4. 勝点・得失点・順位はSheets側で自動計算する  
+"""
+    )
+
+    nb_cup_sheet_url = _get_secret_text("nb_cup_sheet_url")
+
+    if not nb_cup_sheet_url:
+        st.warning("NB-CUP管理表のURLがまだ設定されていません。")
+        st.caption("Streamlit Secrets に nb_cup_sheet_url を追加してください。")
+        return
+
+    st.link_button(
+        "NB-CUP管理表を開く",
+        nb_cup_sheet_url,
+        use_container_width=True,
+    )
+
+    st.caption("※得点入力セル以外は、Google Sheets側の保護範囲で編集制御してください。")
+
+
 # ======================
 # portfolio UI（固定入力 / 日付連動）
 # ======================
@@ -611,7 +664,7 @@ st.title(APP_TITLE_WITH_ICON)
 st.caption(APP_SUBTITLE)
 
 with st.sidebar:
-    page_options = [PAGE_RECORD, PAGE_REVIEW, PAGE_IDP, PAGE_ANALYSIS]
+    page_options = [PAGE_RECORD, PAGE_REVIEW, PAGE_IDP, PAGE_ANALYSIS, PAGE_NB_CUP]
 
     if SHOW_LEGACY_PAGES:
         page_options.extend(
@@ -664,6 +717,10 @@ if page == PAGE_IDP:
 
 if page == PAGE_ANALYSIS:
     render_analyst_report(st, storage)
+    st.stop()
+
+if page == PAGE_NB_CUP:
+    render_nb_cup_page(st)
     st.stop()
 
 if page == LEGACY_PAGE_ROADMAP:
