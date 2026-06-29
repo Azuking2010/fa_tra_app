@@ -1,5 +1,5 @@
 # file: modules/ui_practice_log.py
-# purpose: 練習/試合後メモページのUIを担当する。日付ごとに練習・試合・自主練・勉強の自由記述メモを保存・表示する。
+# purpose: 練習/試合後メモページのUIを担当する。日付ごとに練習・試合・自主練・勉強の自由記述メモと、ストレッチ/ベルリッツの習慣チェックを保存・表示する。
 
 from __future__ import annotations
 
@@ -17,10 +17,12 @@ QUESTION_MATCH = """出場ポジション、試合で意識したこと、でき
 覚えていることだけでOK。"""
 
 QUESTION_SELF_TRAINING = """チーム練習後や家でやったこと。
-ドリブル、左足、ダッシュ、ストレッチ、体幹など。やった内容だけでもOK。"""
+ドリブル、左足、ダッシュ、体幹など。やった内容だけでもOK。
+※ストレッチは上の習慣チェックで記録できます。"""
 
 QUESTION_STUDY = """勉強した内容、テスト、提出物、英語、よかったこと、困ったことなど。
-一言でもOK。"""
+一言でもOK。
+※月曜のベルリッツは上の習慣チェックで記録できます。"""
 
 
 TEXT_INPUT_KEYS = [
@@ -28,6 +30,11 @@ TEXT_INPUT_KEYS = [
     "practice_log_match_text",
     "practice_log_self_training_text",
     "practice_log_study_text",
+]
+
+CHECK_INPUT_KEYS = [
+    "practice_log_stretch_done",
+    "practice_log_berlitz_done",
 ]
 
 
@@ -63,6 +70,45 @@ def _make_log_id(selected_date: date) -> str:
     return f"PL-{selected_date.strftime('%Y%m%d')}-{stamp}"
 
 
+def _is_monday(selected_date: date) -> bool:
+    return selected_date.weekday() == 0
+
+
+def _bool_to_sheet(value: bool) -> str:
+    return "TRUE" if bool(value) else "FALSE"
+
+
+def _as_bool(value: Any) -> bool | None:
+    """
+    Sheets/CSVから読み込んだ TRUE/FALSE/1/0/yes/no をboolへ寄せる。
+    空欄は None として扱う。
+    """
+    if _is_blank(value):
+        return None
+
+    s = str(value).strip().lower()
+
+    if s in ["true", "1", "yes", "y", "done", "済", "実施", "やった"]:
+        return True
+
+    if s in ["false", "0", "no", "n", "未", "未実施", "やってない"]:
+        return False
+
+    return None
+
+
+def _status_badge(label: str, value: Any) -> str:
+    b = _as_bool(value)
+
+    if b is True:
+        return f"✅ {label}：やった"
+
+    if b is False:
+        return f"⬜ {label}：やってない"
+
+    return f"— {label}：未入力"
+
+
 def _clear_input_boxes(st) -> None:
     """
     入力欄をクリアする。
@@ -70,6 +116,9 @@ def _clear_input_boxes(st) -> None:
     """
     for key in TEXT_INPUT_KEYS:
         st.session_state[key] = ""
+
+    for key in CHECK_INPUT_KEYS:
+        st.session_state[key] = False
 
 
 def _sync_selected_date_and_clear_if_needed(st, selected_date: date) -> None:
@@ -137,11 +186,16 @@ def _render_recent_logs(st, df: pd.DataFrame) -> None:
         self_training = _txt(row.get("self_training_text"), "")
         study = _txt(row.get("study_text"), "")
 
+        stretch_status = _status_badge("ストレッチ", row.get("stretch_done"))
+        berlitz_status = _status_badge("ベルリッツ", row.get("berlitz_done"))
+
         with st.container(border=True):
             st.markdown(f"### {log_date}")
 
             if created_at:
                 st.caption(f"保存：{created_at}")
+
+            st.caption(f"{stretch_status}　/　{berlitz_status}")
 
             if training:
                 st.markdown("**練習**")
@@ -180,6 +234,27 @@ def render_practice_log(st, storage) -> None:
     if st.session_state.pop("practice_log_clear_after_save", False):
         _clear_input_boxes(st)
         st.success("メモを保存しました。")
+
+    st.divider()
+
+    st.markdown("### ✅ 習慣チェック")
+    st.caption("毎日のストレッチや、月曜のベルリッツなど、文章にしなくてもよい継続項目をチェックします。")
+
+    stretch_done = st.checkbox(
+        "ストレッチをやった",
+        key="practice_log_stretch_done",
+    )
+
+    show_berlitz = _is_monday(selected_date)
+
+    if show_berlitz:
+        berlitz_done = st.checkbox(
+            "ベルリッツ完了",
+            key="practice_log_berlitz_done",
+        )
+    else:
+        berlitz_done = False
+        st.caption("ベルリッツのチェックは月曜日だけ表示します。")
 
     st.divider()
 
@@ -231,8 +306,11 @@ def render_practice_log(st, storage) -> None:
         self_training_text = str(self_training_text).strip()
         study_text = str(study_text).strip()
 
-        if not _has_any_text(training_text, match_text, self_training_text, study_text):
-            st.warning("保存するメモがありません。どこか1つだけでも書いてください。")
+        has_any_text = _has_any_text(training_text, match_text, self_training_text, study_text)
+        has_any_check = bool(stretch_done) or bool(berlitz_done)
+
+        if not has_any_text and not has_any_check:
+            st.warning("保存する内容がありません。メモを書くか、習慣チェックを1つ以上入れてください。")
             return
 
         now = _now_str()
@@ -244,6 +322,8 @@ def render_practice_log(st, storage) -> None:
             "match_text": match_text,
             "self_training_text": self_training_text,
             "study_text": study_text,
+            "stretch_done": _bool_to_sheet(stretch_done),
+            "berlitz_done": _bool_to_sheet(berlitz_done) if show_berlitz else "",
             "source": "app",
             "created_at": now,
             "updated_at": now,

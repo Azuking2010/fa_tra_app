@@ -222,6 +222,8 @@ PRACTICE_LOG_COLUMNS = [
     "match_text",
     "self_training_text",
     "study_text",
+    "stretch_done",
+    "berlitz_done",
     "source",
     "created_at",
     "updated_at",
