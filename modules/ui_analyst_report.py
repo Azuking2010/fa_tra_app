@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, timedelta
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -14,11 +14,13 @@ import pandas as pd
 import streamlit as _st
 
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from matplotlib import font_manager
 from matplotlib.ticker import FuncFormatter
 
 
 ANALYST_CACHE_TTL_SECONDS = 60 * 60 * 12  # 12時間
+ANALYST_REPORT_CODE_VERSION = "2026-07-24-axis-fix-v4"
 
 FONT_DIR = Path("assets/fonts/Noto_Sans_JP")
 
@@ -872,6 +874,61 @@ def _style_axis(ax) -> None:
     ax.tick_params(axis="x", labelrotation=30)
 
 
+
+def _apply_date_axis_bounds(
+    ax,
+    frames: list[pd.DataFrame],
+    single_date_pad_days: int = 14,
+) -> None:
+    """
+    実際に描画している日付だけを使い、x軸の表示範囲を強制設定する。
+
+    matplotlibは、日付データが1日分しかない場合に自動余白を
+    数年単位まで広げることがある。その自動挙動を避けるため、
+    datetimeをmatplotlibの数値日付へ明示変換してからset_xlimする。
+    """
+    date_values: list[pd.Timestamp] = []
+
+    for frame in frames:
+        if frame is None or frame.empty or "_date" not in frame.columns:
+            continue
+
+        series = pd.to_datetime(frame["_date"], errors="coerce").dropna()
+        if series.empty:
+            continue
+
+        normalized = series.dt.normalize()
+        date_values.extend(normalized.tolist())
+
+    if not date_values:
+        return
+
+    min_dt = pd.Timestamp(min(date_values)).normalize()
+    max_dt = pd.Timestamp(max(date_values)).normalize()
+
+    min_num = mdates.date2num(min_dt.to_pydatetime())
+    max_num = mdates.date2num(max_dt.to_pydatetime())
+
+    if min_dt == max_dt:
+        pad_days = float(max(1, single_date_pad_days))
+        ax.set_xlim(min_num - pad_days, max_num + pad_days)
+
+        locator = mdates.DayLocator(interval=7)
+        formatter = mdates.DateFormatter("%m/%d")
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(formatter)
+        return
+
+    span_days = max(1, int((max_dt - min_dt).days))
+    pad_days = float(max(2, round(span_days * 0.04)))
+
+    ax.set_xlim(min_num - pad_days, max_num + pad_days)
+
+    locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
+    formatter = mdates.ConciseDateFormatter(locator)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(formatter)
+
 def _render_chart_title(st, title: str, sub: str) -> None:
     st.markdown(
         f"""
@@ -973,6 +1030,7 @@ def _plot_body_chart(
     ax1.set_xlabel("日付")
     _style_axis(ax1)
     ax1.legend(lines, labels, loc="best")
+    _apply_date_axis_bounds(ax1, [height_view, weight_view])
 
     fig.tight_layout()
     _show_pyplot(st, fig)
@@ -1043,6 +1101,8 @@ def _plot_time_chart(
         weight="bold",
         color=color,
     )
+
+    _apply_date_axis_bounds(ax, [view])
 
     fig.tight_layout()
     _show_pyplot(st, fig)
@@ -1121,6 +1181,8 @@ def _plot_single_metric_chart(
         weight="bold",
         color=color,
     )
+
+    _apply_date_axis_bounds(ax, [view])
 
     fig.tight_layout()
     _show_pyplot(st, fig)
@@ -1206,6 +1268,10 @@ def _plot_multi_line_chart(
 
     _style_axis(ax)
     ax.legend(loc="best")
+    _apply_date_axis_bounds(
+        ax,
+        [points for _, points in filtered_series],
+    )
 
     fig.tight_layout()
     _show_pyplot(st, fig)
@@ -1298,6 +1364,10 @@ def _plot_grade_chart(st, df: pd.DataFrame) -> None:
 
     _style_axis(ax)
     ax.legend(loc="best", ncol=2)
+    _apply_date_axis_bounds(
+        ax,
+        [points for _, points in filtered_series],
+    )
 
     fig.tight_layout()
     _show_pyplot(st, fig)
