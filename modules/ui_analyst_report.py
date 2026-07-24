@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,7 @@ BASE_PORTFOLIO_COLUMNS = [
     "track_meet",
     "rank",
     "deviation",
-    "rating",
+    "rating",  # 9教科平均評定
     "score_jp",
     "score_math",
     "score_en",
@@ -49,6 +50,24 @@ BASE_PORTFOLIO_COLUMNS = [
     "record_type",
     "source_id",
     "analyst_note",
+    "assist_count",
+    "goal_count",
+    "chance_creation_count",
+    "effective_receive_count",
+    "shot_count",
+    "left_foot_shot_count",
+    "key_pass_count",
+    "interception_count",
+    "u14_match_count",
+    "u15_squad_count",
+    "u15_match_minutes",
+    "stretch_count",
+    "practice_log_count",
+    "grade_jp",
+    "grade_math",
+    "grade_en",
+    "grade_sci",
+    "grade_soc",
 ]
 
 COUNT_LABELS = {
@@ -60,6 +79,8 @@ COUNT_LABELS = {
     "goal_count": "ゴール",
     "shot_count": "シュート",
     "left_foot_shot_count": "左足シュート",
+    "key_pass_count": "キーパス",
+    "interception_count": "インターセプト",
     "u14_match_count": "U14試合",
     "u15_squad_count": "U15帯同",
     "practice_log_count": "練習後メモ",
@@ -72,6 +93,15 @@ SCORE_COLS = [
     ("score_en", "英語"),
     ("score_sci", "理科"),
     ("score_soc", "社会"),
+]
+
+GRADE_COLS = [
+    ("grade_jp", "国語評定"),
+    ("grade_math", "数学評定"),
+    ("grade_en", "英語評定"),
+    ("grade_sci", "理科評定"),
+    ("grade_soc", "社会評定"),
+    ("rating", "9教科平均評定"),
 ]
 
 EVENT_COLUMNS = [
@@ -92,8 +122,25 @@ COLOR_1500 = "#2563EB"
 COLOR_3000 = "#7C3AED"
 COLOR_RANK = "#16A34A"
 COLOR_DEVIATION = "#0891B2"
-COLOR_RATING = "#EA580C"
+COLOR_RATING = "#111827"
 COLOR_GRID = "#DDEAF0"
+
+SCORE_COLORS = {
+    "国語": "#2563EB",
+    "数学": "#DC2626",
+    "英語": "#16A34A",
+    "理科": "#9333EA",
+    "社会": "#EA580C",
+}
+
+GRADE_STYLES = {
+    "国語評定": ("#2563EB", "o"),
+    "数学評定": ("#DC2626", "s"),
+    "英語評定": ("#16A34A", "^"),
+    "理科評定": ("#9333EA", "v"),
+    "社会評定": ("#EA580C", "P"),
+    "9教科平均評定": ("#111827", "D"),
+}
 
 MULTI_COLORS = [
     "#2563EB",
@@ -105,7 +152,6 @@ MULTI_COLORS = [
     "#BE123C",
     "#4F46E5",
 ]
-
 
 @_st.cache_data(ttl=ANALYST_CACHE_TTL_SECONDS, show_spinner=False)
 def _load_portfolio_cached(_storage, storage_key: str, cache_version: int) -> pd.DataFrame:
@@ -328,23 +374,29 @@ def _norm_number_text(value: Any) -> str:
     text = text.replace("ＫＧ", "")
     text = text.replace("点", "")
     text = text.replace("位", "")
+    text = text.replace("回", "")
     return text.strip()
 
 
 def _parse_float(value: Any) -> float | None:
+    """
+    数値列を厳格に読む。
+
+    以前はセル内の最初の数字を拾っていたため、
+    「U14」「30分×3本」などの文章が点数として誤認される可能性があった。
+    現在は、単位を除いたセル全体が数値として成立する場合だけ採用する。
+    """
     text = _norm_number_text(value)
     if not text:
         return None
 
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
-    if not match:
+    if not re.fullmatch(r"-?\d+(?:\.\d+)?", text):
         return None
 
     try:
-        return float(match.group(0))
+        return float(text)
     except Exception:
         return None
-
 
 def _parse_seconds(value: Any) -> float | None:
     """
@@ -412,17 +464,78 @@ def _clean_portfolio(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
-def _filter_by_period(st, df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
+def _date_bounds_from_frames(frames: list[pd.DataFrame]) -> tuple[date | None, date | None]:
+    dates: list[date] = []
 
-    min_date = df["_date_only"].min()
-    max_date = df["_date_only"].max()
+    for frame in frames:
+        if frame is None or frame.empty or "_date_only" not in frame.columns:
+            continue
 
-    st.markdown('<div class="analyst-section-title">表示期間</div>', unsafe_allow_html=True)
+        for value in frame["_date_only"].tolist():
+            if isinstance(value, date):
+                dates.append(value)
 
-    with st.container():
-        st.markdown('<div class="analyst-filter-card">', unsafe_allow_html=True)
+    if not dates:
+        return None, None
+
+    return min(dates), max(dates)
+
+
+def _clamp_date_state(st, key: str, minimum: date, maximum: date, fallback: date) -> None:
+    """
+    過去のsession_stateに残った日付が、新しいデータ範囲外になっても
+    date_inputがエラーにならないように補正する。
+    """
+    if key not in st.session_state:
+        return
+
+    try:
+        value = st.session_state[key]
+        if not isinstance(value, date) or value < minimum or value > maximum:
+            st.session_state[key] = fallback
+    except Exception:
+        st.session_state[key] = fallback
+
+
+def _local_period_control(
+    st,
+    frames: list[pd.DataFrame],
+    key_prefix: str,
+    label: str,
+) -> tuple[date | None, date | None]:
+    """
+    グラフごとの期間指定。
+
+    デフォルトは、そのグラフで有効な最古データ日〜最新データ日。
+    「このグラフだけ期間を指定する」をONにした場合だけ個別指定する。
+    """
+    min_date, max_date = _date_bounds_from_frames(frames)
+
+    if min_date is None or max_date is None:
+        return None, None
+
+    st.caption(f"データ期間：{min_date} 〜 {max_date}")
+
+    if min_date == max_date:
+        return min_date, max_date
+
+    enabled_key = f"{key_prefix}_period_enabled"
+    start_key = f"{key_prefix}_period_start"
+    end_key = f"{key_prefix}_period_end"
+
+    with st.expander("表示期間を変更", expanded=False):
+        enabled = st.checkbox(
+            f"{label}だけ期間を指定する",
+            value=False,
+            key=enabled_key,
+        )
+
+        if not enabled:
+            st.caption("現在は、この項目の全データ期間を表示しています。")
+            return min_date, max_date
+
+        _clamp_date_state(st, start_key, min_date, max_date, min_date)
+        _clamp_date_state(st, end_key, min_date, max_date, max_date)
 
         c1, c2 = st.columns(2)
 
@@ -431,7 +544,7 @@ def _filter_by_period(st, df: pd.DataFrame) -> pd.DataFrame:
             value=min_date,
             min_value=min_date,
             max_value=max_date,
-            key="analyst_start_date",
+            key=start_key,
         )
 
         end_date = c2.date_input(
@@ -439,20 +552,49 @@ def _filter_by_period(st, df: pd.DataFrame) -> pd.DataFrame:
             value=max_date,
             min_value=min_date,
             max_value=max_date,
-            key="analyst_end_date",
+            key=end_key,
         )
 
-        st.markdown("</div>", unsafe_allow_html=True)
+        if start_date > end_date:
+            st.warning("開始日が終了日より後になっています。")
+            return start_date, end_date
 
-    if start_date > end_date:
-        st.warning("開始日が終了日より後になっています。期間を確認してください。")
-        return df.iloc[0:0].copy()
+    st.caption(f"表示期間：{start_date} 〜 {end_date}")
+    return start_date, end_date
 
-    filtered = df[(df["_date_only"] >= start_date) & (df["_date_only"] <= end_date)].copy()
 
-    st.caption(f"表示対象：{start_date} 〜 {end_date} / {len(filtered)}行")
+def _filter_points_by_period(
+    points: pd.DataFrame,
+    start_date: date | None,
+    end_date: date | None,
+) -> pd.DataFrame:
+    if points is None or points.empty:
+        return points
 
-    return filtered.reset_index(drop=True)
+    if start_date is None or end_date is None:
+        return points
+
+    return points[
+        (points["_date_only"] >= start_date)
+        & (points["_date_only"] <= end_date)
+    ].copy().reset_index(drop=True)
+
+
+def _filter_df_by_period(
+    df: pd.DataFrame,
+    start_date: date | None,
+    end_date: date | None,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    if start_date is None or end_date is None:
+        return df
+
+    return df[
+        (df["_date_only"] >= start_date)
+        & (df["_date_only"] <= end_date)
+    ].copy().reset_index(drop=True)
 
 
 def _first_non_empty_value(row: pd.Series, columns: list[str]) -> Any:
@@ -462,10 +604,20 @@ def _first_non_empty_value(row: pd.Series, columns: list[str]) -> Any:
     return None
 
 
-def _metric_points(df: pd.DataFrame, value_cols: list[str], value_type: str) -> pd.DataFrame:
+def _metric_points(
+    df: pd.DataFrame,
+    value_cols: list[str],
+    value_type: str,
+    allow_zero: bool = False,
+    valid_min: float | None = None,
+    valid_max: float | None = None,
+) -> pd.DataFrame:
     """
     metricごとの有効値だけを抽出する。
-    同じ日付に複数行ある場合は、その日付の最後の非空値を採用する。
+
+    - 同じ日付に複数行ある場合は、その日付の最後の非空値を採用する。
+    - 数値列はセル全体が数値として成立する場合だけ採用する。
+    - valid_min / valid_max を指定すると、想定範囲外の値を除外する。
     """
     empty_cols = ["_date", "_date_only", "value", "date_label", "track_meet", "note"]
 
@@ -483,7 +635,17 @@ def _metric_points(df: pd.DataFrame, value_cols: list[str], value_type: str) -> 
 
     d["value"] = values
     d = d.dropna(subset=["value"]).copy()
-    d = d[d["value"] > 0].copy()
+
+    if allow_zero:
+        d = d[d["value"] >= 0].copy()
+    else:
+        d = d[d["value"] > 0].copy()
+
+    if valid_min is not None:
+        d = d[d["value"] >= valid_min].copy()
+
+    if valid_max is not None:
+        d = d[d["value"] <= valid_max].copy()
 
     if d.empty:
         return pd.DataFrame(columns=empty_cols)
@@ -503,8 +665,22 @@ def _metric_points(df: pd.DataFrame, value_cols: list[str], value_type: str) -> 
     return d[empty_cols].sort_values("_date").reset_index(drop=True)
 
 
-def _metric_points_single(df: pd.DataFrame, value_col: str, value_type: str = "float") -> pd.DataFrame:
-    return _metric_points(df, [value_col], value_type)
+def _metric_points_single(
+    df: pd.DataFrame,
+    value_col: str,
+    value_type: str = "float",
+    allow_zero: bool = False,
+    valid_min: float | None = None,
+    valid_max: float | None = None,
+) -> pd.DataFrame:
+    return _metric_points(
+        df,
+        [value_col],
+        value_type,
+        allow_zero=allow_zero,
+        valid_min=valid_min,
+        valid_max=valid_max,
+    )
 
 
 def _format_mmss(total_seconds: Any) -> str:
@@ -652,13 +828,13 @@ def _render_hero(st) -> None:
 <div class="analyst-hero">
   <div class="analyst-hero-title">📊 Analyst Report</div>
   <div class="analyst-hero-sub">
-    身体・タイム・学業・行動countを分析するページです。Sheetsのportfolioを読み取り専用で表示します。
+    身体・タイム・学業・行動countを分析するページです。
+    各グラフは、その項目の最古データ日から最新データ日までを初期表示します。
   </div>
 </div>
 """,
         unsafe_allow_html=True,
     )
-
 
 def _render_latest_cards(
     st,
@@ -715,18 +891,39 @@ def _show_pyplot(st, fig) -> None:
         plt.close(fig)
 
 
-def _plot_body_chart(st, height_points: pd.DataFrame, weight_points: pd.DataFrame) -> None:
+def _plot_body_chart(
+    st,
+    height_points: pd.DataFrame,
+    weight_points: pd.DataFrame,
+) -> None:
     _render_chart_title(
         st,
         "身長・体重",
-        "左軸：身長cm / 右軸：体重kg。身体の変化を確認します。",
+        "左軸：身長cm / 右軸：体重kg。各データの最古記録から最新記録までを初期表示します。",
     )
 
     has_height = height_points is not None and not height_points.empty
     has_weight = weight_points is not None and not weight_points.empty
 
     if not has_height and not has_weight:
-        st.info("この期間に身長・体重の記録はありません。")
+        st.info("身長・体重の記録はありません。")
+        return
+
+    start_date, end_date = _local_period_control(
+        st,
+        [height_points, weight_points],
+        "analyst_body",
+        "身長・体重",
+    )
+
+    height_view = _filter_points_by_period(height_points, start_date, end_date)
+    weight_view = _filter_points_by_period(weight_points, start_date, end_date)
+
+    has_height = height_view is not None and not height_view.empty
+    has_weight = weight_view is not None and not weight_view.empty
+
+    if not has_height and not has_weight:
+        st.info("指定した期間に身長・体重の記録はありません。")
         return
 
     fig, ax1 = plt.subplots(figsize=(8.5, 4.6))
@@ -738,8 +935,8 @@ def _plot_body_chart(st, height_points: pd.DataFrame, weight_points: pd.DataFram
 
     if has_height:
         line_h, = ax1.plot(
-            height_points["_date"],
-            height_points["value"],
+            height_view["_date"],
+            height_view["value"],
             marker="o",
             linewidth=2.8,
             color=COLOR_HEIGHT,
@@ -758,8 +955,8 @@ def _plot_body_chart(st, height_points: pd.DataFrame, weight_points: pd.DataFram
 
         ax2.set_facecolor("#ffffff")
         line_w, = ax2.plot(
-            weight_points["_date"],
-            weight_points["value"],
+            weight_view["_date"],
+            weight_view["value"],
             marker="o",
             linewidth=2.8,
             color=COLOR_WEIGHT,
@@ -780,7 +977,6 @@ def _plot_body_chart(st, height_points: pd.DataFrame, weight_points: pd.DataFram
     fig.tight_layout()
     _show_pyplot(st, fig)
 
-
 def _time_formatter(metric_key: str):
     if metric_key == "run_50":
         return FuncFormatter(lambda x, pos: f"{x:.2f}秒")
@@ -794,11 +990,25 @@ def _plot_time_chart(
     sub: str,
     color: str,
     metric_key: str,
+    key_prefix: str,
 ) -> None:
     _render_chart_title(st, title, sub)
 
     if points is None or points.empty:
-        st.info(f"この期間に{title}の記録はありません。")
+        st.info(f"{title}の記録はありません。")
+        return
+
+    start_date, end_date = _local_period_control(
+        st,
+        [points],
+        key_prefix,
+        title,
+    )
+
+    view = _filter_points_by_period(points, start_date, end_date)
+
+    if view is None or view.empty:
+        st.info(f"指定した期間に{title}の記録はありません。")
         return
 
     fig, ax = plt.subplots(figsize=(8.5, 4.3))
@@ -806,8 +1016,8 @@ def _plot_time_chart(
     ax.set_facecolor("#ffffff")
 
     ax.plot(
-        points["_date"],
-        points["value"],
+        view["_date"],
+        view["value"],
         marker="o",
         linewidth=2.8,
         color=color,
@@ -817,13 +1027,13 @@ def _plot_time_chart(
     ax.set_ylabel("タイム")
     ax.yaxis.set_major_formatter(_time_formatter(metric_key))
 
-    # 重要：タイムは小さいほど速い。
-    # グラフ上では「上がる＝速くなる」にしたいため、y軸を反転する。
+    # タイムは小さいほど速い。
+    # グラフ上では「上がる＝速くなる」にするため、y軸を反転する。
     ax.invert_yaxis()
 
     _style_axis(ax)
 
-    latest = points.iloc[-1]
+    latest = view.iloc[-1]
     ax.annotate(
         _format_metric_value(latest["value"], metric_key),
         xy=(latest["_date"], latest["value"]),
@@ -836,7 +1046,6 @@ def _plot_time_chart(
 
     fig.tight_layout()
     _show_pyplot(st, fig)
-
 
 def _plot_single_metric_chart(
     st,
@@ -846,21 +1055,46 @@ def _plot_single_metric_chart(
     ylabel: str,
     color: str,
     metric_key: str,
-    invert_y: bool = False,
+    key_prefix: str,
+    y_limits: tuple[float, float] | None = None,
+    y_ticks: list[float] | None = None,
 ) -> None:
     _render_chart_title(st, title, sub)
 
     if points is None or points.empty:
-        st.info(f"この期間に{title}の記録はありません。")
+        st.info(f"{title}の記録はありません。")
         return
+
+    start_date, end_date = _local_period_control(
+        st,
+        [points],
+        key_prefix,
+        title,
+    )
+
+    view = _filter_points_by_period(points, start_date, end_date)
+
+    if view is None or view.empty:
+        st.info(f"指定した期間に{title}の記録はありません。")
+        return
+
+    if y_limits is not None:
+        low = min(y_limits)
+        high = max(y_limits)
+        outside = view[(view["value"] < low) | (view["value"] > high)]
+        if not outside.empty:
+            st.warning(
+                f"{title}に表示範囲外のデータがあります。"
+                f"グラフの縦軸は {y_limits[0]}〜{y_limits[1]} に固定しています。"
+            )
 
     fig, ax = plt.subplots(figsize=(8.5, 4.1))
     fig.patch.set_facecolor("#ffffff")
     ax.set_facecolor("#ffffff")
 
     ax.plot(
-        points["_date"],
-        points["value"],
+        view["_date"],
+        view["value"],
         marker="o",
         linewidth=2.6,
         color=color,
@@ -869,12 +1103,15 @@ def _plot_single_metric_chart(
     ax.set_xlabel("日付")
     ax.set_ylabel(ylabel)
 
-    if invert_y:
-        ax.invert_yaxis()
+    if y_limits is not None:
+        ax.set_ylim(y_limits[0], y_limits[1])
+
+    if y_ticks is not None:
+        ax.set_yticks(y_ticks)
 
     _style_axis(ax)
 
-    latest = points.iloc[-1]
+    latest = view.iloc[-1]
     ax.annotate(
         _format_metric_value(latest["value"], metric_key),
         xy=(latest["_date"], latest["value"]),
@@ -888,7 +1125,6 @@ def _plot_single_metric_chart(
     fig.tight_layout()
     _show_pyplot(st, fig)
 
-
 def _plot_multi_line_chart(
     st,
     df: pd.DataFrame,
@@ -896,30 +1132,60 @@ def _plot_multi_line_chart(
     title: str,
     sub: str,
     ylabel: str,
+    key_prefix: str,
+    valid_min: float | None = None,
+    valid_max: float | None = None,
+    y_limits: tuple[float, float] | None = None,
+    y_ticks: list[float] | None = None,
 ) -> None:
     _render_chart_title(st, title, sub)
 
     if df is None or df.empty:
-        st.info(f"この期間に{title}の記録はありません。")
+        st.info(f"{title}の記録はありません。")
         return
 
-    series_list = []
+    series_list: list[tuple[str, pd.DataFrame]] = []
 
     for col, label in metric_defs:
-        points = _metric_points_single(df, col, "float")
+        points = _metric_points_single(
+            df,
+            col,
+            "float",
+            allow_zero=True,
+            valid_min=valid_min,
+            valid_max=valid_max,
+        )
         if points is not None and not points.empty:
             series_list.append((label, points))
 
     if not series_list:
-        st.info(f"この期間に{title}の記録はありません。")
+        st.info(f"{title}の記録はありません。")
+        return
+
+    start_date, end_date = _local_period_control(
+        st,
+        [points for _, points in series_list],
+        key_prefix,
+        title,
+    )
+
+    filtered_series: list[tuple[str, pd.DataFrame]] = []
+
+    for label, points in series_list:
+        view = _filter_points_by_period(points, start_date, end_date)
+        if view is not None and not view.empty:
+            filtered_series.append((label, view))
+
+    if not filtered_series:
+        st.info(f"指定した期間に{title}の記録はありません。")
         return
 
     fig, ax = plt.subplots(figsize=(8.5, 4.5))
     fig.patch.set_facecolor("#ffffff")
     ax.set_facecolor("#ffffff")
 
-    for idx, (label, points) in enumerate(series_list):
-        color = MULTI_COLORS[idx % len(MULTI_COLORS)]
+    for idx, (label, points) in enumerate(filtered_series):
+        color = SCORE_COLORS.get(label, MULTI_COLORS[idx % len(MULTI_COLORS)])
         ax.plot(
             points["_date"],
             points["value"],
@@ -931,12 +1197,113 @@ def _plot_multi_line_chart(
 
     ax.set_xlabel("日付")
     ax.set_ylabel(ylabel)
+
+    if y_limits is not None:
+        ax.set_ylim(y_limits[0], y_limits[1])
+
+    if y_ticks is not None:
+        ax.set_yticks(y_ticks)
+
     _style_axis(ax)
     ax.legend(loc="best")
 
     fig.tight_layout()
     _show_pyplot(st, fig)
 
+
+def _plot_grade_chart(st, df: pd.DataFrame) -> None:
+    _render_chart_title(
+        st,
+        "評定",
+        "5教科の個別評定と9教科平均評定を、1つの折れ線グラフで表示します。",
+    )
+
+    if df is None or df.empty:
+        st.info("評定の記録はありません。")
+        return
+
+    series_list: list[tuple[str, pd.DataFrame]] = []
+
+    for col, label in GRADE_COLS:
+        points = _metric_points_single(
+            df,
+            col,
+            "float",
+            allow_zero=False,
+            valid_min=1.0,
+            valid_max=5.0,
+        )
+        if points is not None and not points.empty:
+            series_list.append((label, points))
+
+    if not series_list:
+        st.info("評定の記録はありません。")
+        return
+
+    start_date, end_date = _local_period_control(
+        st,
+        [points for _, points in series_list],
+        "analyst_grade",
+        "評定",
+    )
+
+    filtered_series: list[tuple[str, pd.DataFrame]] = []
+
+    for label, points in series_list:
+        view = _filter_points_by_period(points, start_date, end_date)
+        if view is not None and not view.empty:
+            filtered_series.append((label, view))
+
+    if not filtered_series:
+        st.info("指定した期間に評定の記録はありません。")
+        return
+
+    if any((points["value"] < 2.0).any() for _, points in filtered_series):
+        st.warning("2.0未満の評定データがあります。グラフの縦軸は2.0〜5.0に固定しています。")
+
+    fig, ax = plt.subplots(figsize=(8.5, 4.8))
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
+
+    latest_parts: list[str] = []
+
+    for label, points in filtered_series:
+        color, marker = GRADE_STYLES.get(label, ("#4F46E5", "o"))
+        is_average = label == "9教科平均評定"
+
+        ax.plot(
+            points["_date"],
+            points["value"],
+            marker=marker,
+            markersize=7.5 if is_average else 6.5,
+            linewidth=3.2 if is_average else 2.0,
+            color=color,
+            label=label,
+            zorder=4 if is_average else 3,
+        )
+
+        latest = points.iloc[-1]
+        latest_value = float(latest["value"])
+
+        if is_average:
+            latest_parts.append(f"9教科平均 {latest_value:.2f}")
+        else:
+            short_label = label.replace("評定", "")
+            latest_parts.append(f"{short_label} {latest_value:g}")
+
+    ax.set_xlabel("日付")
+    ax.set_ylabel("評定")
+    ax.set_ylim(2.0, 5.0)
+    ax.set_yticks([2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0])
+
+    _style_axis(ax)
+    ax.legend(loc="best", ncol=2)
+
+    fig.tight_layout()
+    _show_pyplot(st, fig)
+
+    if latest_parts:
+        st.caption("最新値：" + " / ".join(latest_parts))
 
 def _count_columns_in_df(df: pd.DataFrame) -> list[str]:
     if df is None or df.empty:
@@ -983,11 +1350,46 @@ def _plot_count_summary(st, df: pd.DataFrame) -> None:
         st.info("count列はまだありません。stretch_count や scanning_count などをportfolio右側に追加すると表示できます。")
         return
 
+    valid_row_mask = []
+
+    for _, row in df.iterrows():
+        row_has_count = False
+
+        for col in count_cols:
+            parsed = _parse_float(row.get(col))
+            if parsed is not None and parsed > 0:
+                row_has_count = True
+                break
+
+        valid_row_mask.append(row_has_count)
+
+    d_with_counts = df.loc[valid_row_mask].copy()
+
+    if d_with_counts.empty:
+        st.info("表示できるcount記録はありません。")
+        return
+
+    period_points = d_with_counts[["_date", "_date_only"]].drop_duplicates().copy()
+
+    start_date, end_date = _local_period_control(
+        st,
+        [period_points],
+        "analyst_count",
+        "行動count",
+    )
+
+    d = _filter_df_by_period(d_with_counts, start_date, end_date)
+
+    if d is None or d.empty:
+        st.info("指定した期間に表示できるcount記録はありません。")
+        return
+
     values = []
 
     for col in count_cols:
         total = 0.0
-        for v in df[col].tolist():
+
+        for v in d[col].tolist():
             parsed = _parse_float(v)
             if parsed is not None and parsed > 0:
                 total += parsed
@@ -996,7 +1398,7 @@ def _plot_count_summary(st, df: pd.DataFrame) -> None:
             values.append((_count_label(col), total))
 
     if not values:
-        st.info("この期間に表示できるcount記録はありません。")
+        st.info("指定した期間に表示できるcount記録はありません。")
         return
 
     values = sorted(values, key=lambda x: x[1], reverse=True)
@@ -1027,7 +1429,6 @@ def _plot_count_summary(st, df: pd.DataFrame) -> None:
     fig.tight_layout()
     _show_pyplot(st, fig)
 
-
 def _render_events_table(st, df: pd.DataFrame) -> None:
     st.markdown('<div class="analyst-section-title">イベント・メモ</div>', unsafe_allow_html=True)
 
@@ -1042,22 +1443,38 @@ def _render_events_table(st, df: pd.DataFrame) -> None:
         st.caption("表示できるイベント・メモ列がありません。")
         return
 
-    d["date"] = d["_date"].dt.strftime("%Y-%m-%d")
-
     mask = pd.Series(False, index=d.index)
+
     for col in show_cols:
         if col == "date":
             continue
         mask = mask | d[col].astype(str).str.strip().ne("")
 
-    d = d.loc[mask, show_cols].copy()
+    d = d.loc[mask].copy()
 
     if d.empty:
-        st.caption("この期間にイベント・メモはありません。")
+        st.caption("イベント・メモはありません。")
         return
 
-    st.dataframe(d.tail(30), use_container_width=True, hide_index=True)
+    period_points = d[["_date", "_date_only"]].drop_duplicates().copy()
 
+    start_date, end_date = _local_period_control(
+        st,
+        [period_points],
+        "analyst_events",
+        "イベント・メモ",
+    )
+
+    d = _filter_df_by_period(d, start_date, end_date)
+
+    if d is None or d.empty:
+        st.caption("指定した期間にイベント・メモはありません。")
+        return
+
+    d["date"] = d["_date"].dt.strftime("%Y-%m-%d")
+    d = d[show_cols].copy()
+
+    st.dataframe(d.tail(30), use_container_width=True, hide_index=True)
 
 def _render_data_check(st, df: pd.DataFrame) -> None:
     with st.expander("読み取りデータを確認する", expanded=False):
@@ -1078,12 +1495,15 @@ def _render_input_rule(st) -> None:
 - 50mは `run_50m_sec` に秒で入力します。例：`8.12`
 - 旧列 `run_100m_sec` が残っていても、App側では50mとして読みます。
 - 1500m・3000mは、基本は秒で入力します。例：`4:35` → `275`、`9:38` → `578`
-- 1500m・3000mは、誤って `4:35` の形で入っていても、このページでは秒に変換して表示します。
 - 同じ日に複数行ある場合は、その日の最後の非空値を採用します。
+- テスト点数は `score_jp`〜`score_soc` に0〜100で入力します。
+- 9教科平均評定は `rating`、5教科評定は `grade_jp`〜`grade_soc` に入力します。
+- 評定グラフは、5教科個別評定と9教科平均評定を1つにまとめて表示します。
+- 各グラフは、その項目の最古データ日〜最新データ日を初期表示します。
+- 特定期間だけ見たい場合は、各グラフの「表示期間を変更」から指定します。
 - count系は `stretch_count`、`scanning_count`、`assist_count` など、末尾が `_count` の列を追加すると自動で集計対象になります。
 """
         )
-
 
 def render_analyst_report(st, storage) -> None:
     _configure_matplotlib_font()
@@ -1123,24 +1543,40 @@ def render_analyst_report(st, storage) -> None:
         _render_input_rule(st)
         return
 
-    df_clean = _filter_by_period(st, df_clean_all)
+    # 最新サマリーは、各グラフの個別期間指定に影響されず、
+    # portfolio全期間の最新値を表示する。
+    height_points = _metric_points_single(df_clean_all, "height_cm", "float")
+    weight_points = _metric_points_single(df_clean_all, "weight_kg", "float")
+    run50_points = _metric_points(
+        df_clean_all,
+        ["run_50m_sec", "run_100m_sec"],
+        "seconds",
+    )
+    run1500_points = _metric_points_single(df_clean_all, "run_1500m_sec", "seconds")
+    run3000_points = _metric_points_single(df_clean_all, "run_3000m_sec", "seconds")
 
-    if df_clean is None or df_clean.empty:
-        st.info("選択した期間に表示できる記録がありません。")
-        _render_input_rule(st)
-        return
+    rank_points = _metric_points_single(
+        df_clean_all,
+        "rank",
+        "float",
+        valid_min=1.0,
+    )
+    deviation_points = _metric_points_single(
+        df_clean_all,
+        "deviation",
+        "float",
+        valid_min=0.0,
+        valid_max=100.0,
+    )
 
-    height_points = _metric_points_single(df_clean, "height_cm", "float")
-    weight_points = _metric_points_single(df_clean, "weight_kg", "float")
-    run50_points = _metric_points(df_clean, ["run_50m_sec", "run_100m_sec"], "seconds")
-    run1500_points = _metric_points_single(df_clean, "run_1500m_sec", "seconds")
-    run3000_points = _metric_points_single(df_clean, "run_3000m_sec", "seconds")
-
-    rank_points = _metric_points_single(df_clean, "rank", "float")
-    deviation_points = _metric_points_single(df_clean, "deviation", "float")
-    rating_points = _metric_points_single(df_clean, "rating", "float")
-
-    _render_latest_cards(st, height_points, weight_points, run50_points, run1500_points, run3000_points)
+    _render_latest_cards(
+        st,
+        height_points,
+        weight_points,
+        run50_points,
+        run1500_points,
+        run3000_points,
+    )
 
     st.markdown('<div class="analyst-section-title">身体</div>', unsafe_allow_html=True)
     _plot_body_chart(st, height_points, weight_points)
@@ -1154,6 +1590,7 @@ def render_analyst_report(st, storage) -> None:
         "上がるほど速くなっています。初速・加速力の参考記録として確認します。",
         COLOR_50,
         "run_50",
+        "analyst_run50",
     )
 
     _plot_time_chart(
@@ -1163,6 +1600,7 @@ def render_analyst_report(st, storage) -> None:
         "上がるほど速くなっています。持久力・ペース維持力の確認に使います。",
         COLOR_1500,
         "run_1500",
+        "analyst_run1500",
     )
 
     _plot_time_chart(
@@ -1172,64 +1610,69 @@ def render_analyst_report(st, storage) -> None:
         "上がるほど速くなっています。粘り・巡航力・長い距離の安定性を確認します。",
         COLOR_3000,
         "run_3000",
+        "analyst_run3000",
     )
 
     st.markdown('<div class="analyst-section-title">学業</div>', unsafe_allow_html=True)
 
     _plot_multi_line_chart(
         st,
-        df_clean,
+        df_clean_all,
         SCORE_COLS,
         "教科別スコア",
-        "国語・数学・英語・理科・社会の点数推移です。",
+        "国語・数学・英語・理科・社会の点数推移です。縦軸は0〜100点に固定しています。",
         "点数",
+        "analyst_scores",
+        valid_min=0.0,
+        valid_max=100.0,
+        y_limits=(0.0, 100.0),
+        y_ticks=[0, 20, 40, 60, 80, 100],
     )
 
     _plot_single_metric_chart(
         st,
         rank_points,
         "順位",
-        "上がるほど良い表示にするため、順位はy軸を反転しています。",
+        "上がるほど良い表示です。縦軸は下が100位、上が1位です。",
         "順位",
         COLOR_RANK,
         "rank",
-        invert_y=True,
+        "analyst_rank",
+        y_limits=(100.0, 1.0),
+        y_ticks=[1, 20, 40, 60, 80, 100],
     )
 
     _plot_single_metric_chart(
         st,
         deviation_points,
         "偏差値",
-        "偏差値の推移です。",
+        "偏差値の推移です。縦軸は30〜80に固定しています。",
         "偏差値",
         COLOR_DEVIATION,
         "deviation",
-        invert_y=False,
+        "analyst_deviation",
+        y_limits=(30.0, 80.0),
+        y_ticks=[30, 40, 50, 60, 70, 80],
     )
 
-    _plot_single_metric_chart(
-        st,
-        rating_points,
-        "評点",
-        "評点の推移です。",
-        "評点",
-        COLOR_RATING,
-        "rating",
-        invert_y=False,
-    )
+    _plot_grade_chart(st, df_clean_all)
 
     st.markdown('<div class="analyst-section-title">行動count</div>', unsafe_allow_html=True)
-    _plot_count_summary(st, df_clean)
+    _plot_count_summary(st, df_clean_all)
 
-    _render_events_table(st, df_clean)
+    _render_events_table(st, df_clean_all)
 
     st.divider()
 
     _render_input_rule(st)
-    _render_data_check(st, df_clean)
+    _render_data_check(st, df_clean_all)
 
     with st.expander("Analyst Reportを更新する", expanded=False):
-        st.caption("Analyst Reportは12時間キャッシュします。Sheetsを編集した直後に反映したい場合だけ再読み込みしてください。")
+        st.caption(
+            "Analyst Reportは12時間キャッシュします。"
+            "Sheetsを編集した直後に反映したい場合だけ再読み込みしてください。"
+        )
+
         if st.button("Analyst Reportを再読み込み", use_container_width=True):
             _load_portfolio_cached.clear()
             st.session_state["analyst_report_cache_version"] += 1
