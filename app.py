@@ -38,6 +38,9 @@ from modules.ui_pep_review import render_pep_review
 # ★Analyst Reportページ
 from modules.ui_analyst_report import render_analyst_report
 
+# ★夏休み課題ページ
+from modules.ui_homework import render_homework
+
 
 # ======================
 # ページ設定
@@ -54,6 +57,7 @@ PAGE_REVIEW = "🏋️ レビュー"
 PAGE_IDP = "🗺️ IDP"
 PAGE_ANALYSIS = "📊 分析"
 PAGE_NB_CUP = "🏆 NB-CUP"
+PAGE_HOMEWORK = "📚 夏休み課題"
 
 LEGACY_PAGE_TRAINING = "旧：トレーニング"
 LEGACY_PAGE_PORTFOLIO = "旧：ポートフォリオ"
@@ -664,7 +668,7 @@ st.title(APP_TITLE_WITH_ICON)
 st.caption(APP_SUBTITLE)
 
 with st.sidebar:
-    page_options = [PAGE_RECORD, PAGE_REVIEW, PAGE_IDP, PAGE_ANALYSIS, PAGE_NB_CUP]
+    page_options = [PAGE_RECORD, PAGE_REVIEW, PAGE_IDP, PAGE_ANALYSIS, PAGE_HOMEWORK, PAGE_NB_CUP]
 
     if SHOW_LEGACY_PAGES:
         page_options.extend(
@@ -717,6 +721,10 @@ if page == PAGE_IDP:
 
 if page == PAGE_ANALYSIS:
     render_analyst_report(st, storage)
+    st.stop()
+
+if page == PAGE_HOMEWORK:
+    render_homework(st, storage)
     st.stop()
 
 if page == PAGE_NB_CUP:
