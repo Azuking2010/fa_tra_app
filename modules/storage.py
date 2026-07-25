@@ -1,6 +1,6 @@
 # file: modules/storage.py
 # purpose: Google Sheets / CSV fallback の保存・読み込み処理を管理する。
-#          training log、portfolio、ROADMAP、IDP、Training Notice、Daily Schedule、Practice Log のデータアクセスを担当する。
+#          training log、portfolio、ROADMAP、IDP、Training Notice、Daily Schedule、Practice Log、Homework のデータアクセスを担当する。
 
 from __future__ import annotations
 
@@ -231,6 +231,47 @@ PRACTICE_LOG_COLUMNS = [
 
 
 # =========================
+# Homework schemas
+# =========================
+HOMEWORK_COLUMNS = [
+    "homework_id",
+    "subject",
+    "task_name",
+    "unit_type",
+    "start_value",
+    "end_value",
+    "total_units",
+    "due_date",
+    "weight_per_unit",
+    "priority",
+    "completion_rule",
+    "status",
+    "sort_order",
+    "note",
+    "created_at",
+    "updated_at",
+]
+
+HOMEWORK_PROGRESS_COLUMNS = [
+    "progress_id",
+    "homework_id",
+    "progress_date",
+    "completed_start",
+    "completed_end",
+    "completed_value",
+    "source",
+    "note",
+    "created_at",
+]
+
+HOMEWORK_SETTINGS_COLUMNS = [
+    "setting_key",
+    "setting_value",
+    "note",
+]
+
+
+# =========================
 # Helpers
 # =========================
 def _to_numeric_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
@@ -337,6 +378,26 @@ class BaseStorage:
         raise NotImplementedError
 
 
+    # ----- Homework -----
+    def supports_homework(self) -> bool:
+        return False
+
+    def homework_healthcheck(self) -> Tuple[bool, str]:
+        return False, "Homework: unsupported"
+
+    def load_all_homework(self) -> pd.DataFrame:
+        raise NotImplementedError
+
+    def load_all_homework_progress(self) -> pd.DataFrame:
+        raise NotImplementedError
+
+    def append_homework_progress_row(self, row: Dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    def load_all_homework_settings(self) -> pd.DataFrame:
+        raise NotImplementedError
+
+
 # =========================
 # Sheets storage
 # =========================
@@ -357,6 +418,10 @@ class SheetsStorage(BaseStorage):
     training_notice_master_worksheet_name: str = "Training_Notice_Master"
     daily_schedule_worksheet_name: str = "Daily_Schedule"
     practice_log_worksheet_name: str = "Practice_Log"
+
+    homework_worksheet_name: str = "Homework"
+    homework_progress_worksheet_name: str = "Homework_Progress"
+    homework_settings_worksheet_name: str = "Homework_Settings"
 
     _client: Optional[gspread.Client] = None
 
@@ -429,6 +494,9 @@ class SheetsStorage(BaseStorage):
             "training_notice_master_worksheet": self.training_notice_master_worksheet_name,
             "daily_schedule_worksheet": self.daily_schedule_worksheet_name,
             "practice_log_worksheet": self.practice_log_worksheet_name,
+            "homework_worksheet": self.homework_worksheet_name,
+            "homework_progress_worksheet": self.homework_progress_worksheet_name,
+            "homework_settings_worksheet": self.homework_settings_worksheet_name,
         }
 
     # ----- health -----
@@ -602,6 +670,73 @@ class SheetsStorage(BaseStorage):
     def load_all_practice_log(self) -> pd.DataFrame:
         return self._load_sheet_as_df(self.practice_log_worksheet_name, PRACTICE_LOG_COLUMNS)
 
+    # ----- Homework -----
+    def supports_homework(self) -> bool:
+        return True
+
+    def homework_healthcheck(self) -> Tuple[bool, str]:
+        required = [
+            self.homework_worksheet_name,
+            self.homework_progress_worksheet_name,
+            self.homework_settings_worksheet_name,
+        ]
+
+        ok_names = []
+        ng_names = []
+
+        for name in required:
+            try:
+                ws = self._open_ws(name)
+                _ = ws.row_values(1)
+                ok_names.append(name)
+            except Exception:
+                ng_names.append(name)
+
+        if ng_names:
+            return False, f"Homework Sheets 一部NG: {', '.join(ng_names)}"
+
+        return True, f"Homework Sheets OK: {', '.join(ok_names)}"
+
+    def load_all_homework(self) -> pd.DataFrame:
+        df = self._load_sheet_as_df(self.homework_worksheet_name, HOMEWORK_COLUMNS)
+        return _to_numeric_columns(
+            df,
+            [
+                "start_value",
+                "end_value",
+                "total_units",
+                "weight_per_unit",
+                "sort_order",
+            ],
+        )
+
+    def load_all_homework_progress(self) -> pd.DataFrame:
+        df = self._load_sheet_as_df(
+            self.homework_progress_worksheet_name,
+            HOMEWORK_PROGRESS_COLUMNS,
+        )
+        return _to_numeric_columns(
+            df,
+            [
+                "completed_start",
+                "completed_end",
+                "completed_value",
+            ],
+        )
+
+    def append_homework_progress_row(self, row: Dict[str, Any]) -> None:
+        self._append_row_generic(
+            self.homework_progress_worksheet_name,
+            HOMEWORK_PROGRESS_COLUMNS,
+            row,
+        )
+
+    def load_all_homework_settings(self) -> pd.DataFrame:
+        return self._load_sheet_as_df(
+            self.homework_settings_worksheet_name,
+            HOMEWORK_SETTINGS_COLUMNS,
+        )
+
 
 # =========================
 # CSV storage (local fallback)
@@ -621,6 +756,10 @@ class CSVStorage(BaseStorage):
     training_notice_master_path: str = "training_notice_master.csv"
     daily_schedule_path: str = "daily_schedule.csv"
     practice_log_path: str = "practice_log.csv"
+
+    homework_path: str = "homework.csv"
+    homework_progress_path: str = "homework_progress.csv"
+    homework_settings_path: str = "homework_settings.csv"
 
     def _load_csv_as_df(self, path: str, columns: List[str]) -> pd.DataFrame:
         if not os.path.exists(path):
@@ -789,6 +928,70 @@ class CSVStorage(BaseStorage):
     def load_all_practice_log(self) -> pd.DataFrame:
         return self._load_csv_as_df(self.practice_log_path, PRACTICE_LOG_COLUMNS)
 
+    # ----- Homework -----
+    def supports_homework(self) -> bool:
+        return True
+
+    def homework_healthcheck(self) -> Tuple[bool, str]:
+        missing = [
+            path
+            for path in [
+                self.homework_path,
+                self.homework_progress_path,
+                self.homework_settings_path,
+            ]
+            if not os.path.exists(path)
+        ]
+
+        if missing:
+            return True, (
+                "Homework CSV未作成: "
+                + ", ".join(missing)
+                + "（初回保存またはCSV配置後に利用できます）"
+            )
+
+        return True, "Homework CSV fallback OK"
+
+    def load_all_homework(self) -> pd.DataFrame:
+        df = self._load_csv_as_df(self.homework_path, HOMEWORK_COLUMNS)
+        return _to_numeric_columns(
+            df,
+            [
+                "start_value",
+                "end_value",
+                "total_units",
+                "weight_per_unit",
+                "sort_order",
+            ],
+        )
+
+    def load_all_homework_progress(self) -> pd.DataFrame:
+        df = self._load_csv_as_df(
+            self.homework_progress_path,
+            HOMEWORK_PROGRESS_COLUMNS,
+        )
+        return _to_numeric_columns(
+            df,
+            [
+                "completed_start",
+                "completed_end",
+                "completed_value",
+            ],
+        )
+
+    def append_homework_progress_row(self, row: Dict[str, Any]) -> None:
+        self._append_csv_row(
+            self.homework_progress_path,
+            HOMEWORK_PROGRESS_COLUMNS,
+            row,
+        )
+
+    def load_all_homework_settings(self) -> pd.DataFrame:
+        return self._load_csv_as_df(
+            self.homework_settings_path,
+            HOMEWORK_SETTINGS_COLUMNS,
+        )
+
 
 # =========================
 # Factory
@@ -868,6 +1071,14 @@ def build_storage(st) -> BaseStorage:
             daily_schedule_ws = str(st.secrets.get("daily_schedule_worksheet", "Daily_Schedule")).strip()
             practice_log_ws = str(st.secrets.get("practice_log_worksheet", "Practice_Log")).strip()
 
+            homework_ws = str(st.secrets.get("homework_worksheet", "Homework")).strip()
+            homework_progress_ws = str(
+                st.secrets.get("homework_progress_worksheet", "Homework_Progress")
+            ).strip()
+            homework_settings_ws = str(
+                st.secrets.get("homework_settings_worksheet", "Homework_Settings")
+            ).strip()
+
             if spreadsheet_id:
                 return SheetsStorage(
                     st=st,
@@ -883,6 +1094,9 @@ def build_storage(st) -> BaseStorage:
                     training_notice_master_worksheet_name=training_notice_master_ws or "Training_Notice_Master",
                     daily_schedule_worksheet_name=daily_schedule_ws or "Daily_Schedule",
                     practice_log_worksheet_name=practice_log_ws or "Practice_Log",
+                    homework_worksheet_name=homework_ws or "Homework",
+                    homework_progress_worksheet_name=homework_progress_ws or "Homework_Progress",
+                    homework_settings_worksheet_name=homework_settings_ws or "Homework_Settings",
                 )
     except Exception:
         pass
