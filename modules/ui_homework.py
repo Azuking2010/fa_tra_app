@@ -1,6 +1,7 @@
 # file: modules/ui_homework.py
 # purpose: 夏休み課題の進捗登録、全体・教科別進捗、残り学習可能日数、
 #          余裕度判定、Teacher Mikel Artetaへの導線を表示する。
+#          Streamlitのmetric/progress部品は使わず、HTML/CSSで安定表示する。
 
 from __future__ import annotations
 
@@ -339,6 +340,32 @@ def _render_gauge(st, progress_pct: float) -> None:
     )
 
 
+
+def _render_progress_bar(
+    st,
+    label: str,
+    pct: float,
+    detail: str = "",
+) -> None:
+    safe_pct = max(0.0, min(float(pct), 100.0))
+    safe_label = escape(str(label))
+    safe_detail = escape(str(detail))
+    st.markdown(
+        f"""
+<div style="margin:0.35rem 0 1rem 0;">
+  <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-end;margin-bottom:7px;">
+    <div style="font-weight:700;">{safe_label}</div>
+    <div style="font-weight:700;">{safe_pct:.0f}%</div>
+  </div>
+  <div style="width:100%;height:18px;background:#e5e7eb;border-radius:999px;overflow:hidden;">
+    <div style="width:{safe_pct:.2f}%;height:100%;background:#2563eb;border-radius:999px;"></div>
+  </div>
+  <div style="font-size:15px;color:#64748b;margin-top:5px;">{safe_detail}</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
 def _render_status_message(st, status_key: str, emoji: str, message: str) -> None:
     if status_key == "thunder":
         st.error(f"{emoji} {message}")
@@ -417,10 +444,25 @@ def render_homework(st, storage) -> None:
 
     _render_gauge(st, overall_pct)
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("残り学習可能日", f"{remaining_days}日")
-    m2.metric("予定進捗", f"{planned_pct:.0f}%")
-    m3.metric("余裕度差", f"{margin:+.1f}%")
+    st.markdown(
+        f"""
+<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:8px 0 18px 0;">
+  <div style="border:1px solid #e5e7eb;border-radius:14px;padding:14px;background:#ffffff;">
+    <div style="font-size:15px;color:#64748b;">残り学習可能日</div>
+    <div style="font-size:28px;font-weight:800;margin-top:4px;">{remaining_days}日</div>
+  </div>
+  <div style="border:1px solid #e5e7eb;border-radius:14px;padding:14px;background:#ffffff;">
+    <div style="font-size:15px;color:#64748b;">予定進捗</div>
+    <div style="font-size:28px;font-weight:800;margin-top:4px;">{planned_pct:.0f}%</div>
+  </div>
+  <div style="border:1px solid #e5e7eb;border-radius:14px;padding:14px;background:#ffffff;">
+    <div style="font-size:15px;color:#64748b;">余裕度差</div>
+    <div style="font-size:28px;font-weight:800;margin-top:4px;">{margin:+.1f}%</div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     _render_status_message(st, status_key, status_emoji, status_message)
 
@@ -455,10 +497,11 @@ def render_homework(st, storage) -> None:
         subject_rows,
         key=lambda x: _subject_sort_key(x[0]),
     ):
-        st.markdown(f"**{escape(subject)}　{pct:.0f}%**")
-        st.progress(max(0.0, min(pct / 100.0, 1.0)))
-        st.caption(
-            f"{_format_units(done)} / {_format_units(total)}ポイント"
+        _render_progress_bar(
+            st,
+            subject,
+            pct,
+            f"{_format_units(done)} / {_format_units(total)}ポイント",
         )
 
     st.divider()
@@ -602,9 +645,11 @@ def render_homework(st, storage) -> None:
             f"{task['subject']}｜{task['task_name']}｜{task['progress_pct']:.0f}%",
             expanded=False,
         ):
-            st.progress(max(0.0, min(float(task["progress_pct"]) / 100.0, 1.0)))
-            st.write(
-                f"完了：{task['completed_units']} / {task['total_units']} {unit_label}"
+            _render_progress_bar(
+                st,
+                task["task_name"],
+                float(task["progress_pct"]),
+                f"完了：{task['completed_units']} / {task['total_units']} {unit_label}",
             )
             st.write(f"残り：{task['remaining_units']} {unit_label}")
             st.write(f"提出・確認日：{due_text}")
