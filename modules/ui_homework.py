@@ -2,6 +2,7 @@
 # purpose: 夏休み課題の進捗登録、全体・教科別進捗、残り学習可能日数、
 #          余裕度判定、Teacher Mikel Artetaへの導線を表示する。
 #          Streamlitのmetric/progress部品は使わず、HTML/CSSで安定表示する。
+#          page / sheet型の進捗から、予定ラインへ戻すための具体的な数量目安を自動計算する。
 
 from __future__ import annotations
 
@@ -386,6 +387,428 @@ def _subject_sort_key(subject: str) -> Tuple[int, str]:
         return len(SUBJECT_ORDER), subject
 
 
+
+def _priority_rank(value: str) -> int:
+    text = str(value).strip().lower()
+    return {
+        "high": 0,
+        "medium": 1,
+        "low": 2,
+    }.get(text, 9)
+
+
+def _due_date_sort_value(value: object) -> pd.Timestamp:
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return pd.Timestamp.max
+    return parsed
+
+
+def _build_quantitative_subject_summary(summary: pd.DataFrame) -> pd.DataFrame:
+    """
+    「次に進める目安」専用の教科別集計。
+
+    対象:
+    - unit_type = page / sheet
+    - 残量がある課題
+
+    除外:
+    - point / percent / step
+    - 英語教材やビブリオバトル、レポートなどの一発型課題
+
+    教科進捗率はポイントではなく、完了単位数 ÷ 総単位数で計算する。
+    """
+    if summary is None or summary.empty:
+        return pd.DataFrame()
+
+    eligible = summary[
+        summary["unit_type"].astype(str).str.lower().isin(["page", "sheet"])
+    ].copy()
+
+    if eligible.empty:
+        return pd.DataFrame()
+
+    rows: List[Dict[str, object]] = []
+
+    for subject, group in eligible.groupby("subject", dropna=False):
+        subject_name = str(subject).strip() or "その他"
+        total_units = int(group["total_units"].sum())
+        completed_units = int(group["completed_units"].sum())
+        remaining_units = max(total_units - completed_units, 0)
+        progress_pct = (
+            completed_units / total_units * 100.0 if total_units > 0 else 0.0
+        )
+
+        total_workload = float(
+            (group["total_units"] * group["weight_per_unit"]).sum()
+        )
+        completed_workload = float(
+            (group["completed_units"] * group["weight_per_unit"]).sum()
+        )
+        remaining_workload = max(total_workload - completed_workload, 0.0)
+
+        rows.append(
+            {
+                "subject": subject_name,
+                "total_units": total_units,
+                "completed_units": completed_units,
+                "remaining_units": remaining_units,
+                "progress_pct": progress_pct,
+                "total_workload": total_workload,
+                "completed_workload": completed_workload,
+                "remaining_workload": remaining_workload,
+            }
+        )
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+
+    return result.sort_values(
+        ["progress_pct", "remaining_units", "subject"],
+        ascending=[True, False, True],
+    ).reset_index(drop=True)
+
+
+def _allocate_subject_workload(
+    quantitative_subjects: pd.DataFrame,
+    planned_pct: float,
+    required_workload: float,
+) -> List[Tuple[str, float]]:
+    """
+    遅れている教科の上位3教科へ必要量を配分する。
+
+    配分基準:
+    - 教科進捗率が低い順
+    - 予定進捗との差が大きいほど重く配分
+    - 基本イメージは50% / 30% / 20%
+    - 残量を超えた分は次の教科へ回す
+    """
+    if (
+        quantitative_subjects is None
+        or quantitative_subjects.empty
+        or required_workload <= 0
+    ):
+        return []
+
+    candidates = quantitative_subjects[
+        quantitative_subjects["remaining_workload"] > 0
+    ].copy()
+
+    if candidates.empty:
+        return []
+
+    candidates["delay_gap"] = (
+        planned_pct - candidates["progress_pct"]
+    ).clip(lower=0.0)
+
+    candidates = candidates.sort_values(
+        ["progress_pct", "delay_gap", "remaining_workload", "subject"],
+        ascending=[True, False, False, True],
+    ).head(3)
+
+    if candidates.empty:
+        return []
+
+    base_weights = [0.50, 0.30, 0.20][: len(candidates)]
+    base_total = sum(base_weights)
+    base_weights = [weight / base_total for weight in base_weights]
+
+    delay_values = candidates["delay_gap"].tolist()
+    delay_total = sum(delay_values)
+
+    if delay_total > 0:
+        delay_weights = [value / delay_total for value in delay_values]
+        combined_weights = [
+            base * 0.5 + delay * 0.5
+            for base, delay in zip(base_weights, delay_weights)
+        ]
+    else:
+        combined_weights = base_weights
+
+    combined_total = sum(combined_weights)
+    combined_weights = [
+        weight / combined_total for weight in combined_weights
+    ]
+
+    allocations: Dict[str, float] = {
+        str(row["subject"]): 0.0
+        for _, row in candidates.iterrows()
+    }
+
+    remaining_to_allocate = float(required_workload)
+
+    for (_, row), weight in zip(candidates.iterrows(), combined_weights):
+        subject = str(row["subject"])
+        capacity = float(row["remaining_workload"])
+        requested = required_workload * weight
+        assigned = min(requested, capacity)
+        allocations[subject] += assigned
+        remaining_to_allocate -= assigned
+
+    # 容量不足で余った分を、残量がある教科へ順番に再配分する。
+    if remaining_to_allocate > 1e-9:
+        for _, row in candidates.iterrows():
+            subject = str(row["subject"])
+            capacity = float(row["remaining_workload"])
+            room = max(capacity - allocations[subject], 0.0)
+            if room <= 0:
+                continue
+            add = min(room, remaining_to_allocate)
+            allocations[subject] += add
+            remaining_to_allocate -= add
+            if remaining_to_allocate <= 1e-9:
+                break
+
+    return [
+        (subject, workload)
+        for subject, workload in allocations.items()
+        if workload > 1e-9
+    ]
+
+
+def _task_recommendations_for_subject(
+    summary: pd.DataFrame,
+    subject: str,
+    target_workload: float,
+) -> List[Dict[str, object]]:
+    """
+    教科へ割り当てた内部負荷を、実際のページ・枚数へ変換する。
+
+    課題の選択順:
+    1. priority
+    2. due_date
+    3. 現在の進捗率
+    4. Homeworkの表示順
+    """
+    if target_workload <= 0:
+        return []
+
+    tasks = summary[
+        (summary["subject"].astype(str) == str(subject))
+        & summary["unit_type"].astype(str).str.lower().isin(["page", "sheet"])
+        & (summary["remaining_units"] > 0)
+    ].copy()
+
+    if tasks.empty:
+        return []
+
+    tasks["_priority_rank"] = tasks["priority"].map(_priority_rank)
+    tasks["_due_sort"] = tasks["due_date"].map(_due_date_sort_value)
+    tasks = tasks.sort_values(
+        ["_priority_rank", "_due_sort", "progress_pct", "task_name"],
+        ascending=[True, True, True, True],
+    )
+
+    recommendations: List[Dict[str, object]] = []
+    remaining_workload = float(target_workload)
+
+    for _, task in tasks.iterrows():
+        if remaining_workload <= 1e-9:
+            break
+
+        remaining_units = int(task["remaining_units"])
+        if remaining_units <= 0:
+            continue
+
+        weight_per_unit = max(float(task["weight_per_unit"]), 0.0001)
+        needed_units = max(
+            1,
+            int(math.ceil(remaining_workload / weight_per_unit)),
+        )
+        units = min(needed_units, remaining_units)
+
+        recommendations.append(
+            {
+                "subject": str(task["subject"]),
+                "task_name": str(task["task_name"]),
+                "unit_type": str(task["unit_type"]).lower(),
+                "units": units,
+                "workload": units * weight_per_unit,
+            }
+        )
+        remaining_workload -= units * weight_per_unit
+
+    return recommendations
+
+
+def _build_recovery_recommendations(
+    summary: pd.DataFrame,
+    planned_pct: float,
+) -> Tuple[
+    pd.DataFrame,
+    List[Dict[str, object]],
+    float,
+    float,
+    float,
+]:
+    """
+    定量課題のみを対象に、予定ラインへ戻すための目安を作る。
+
+    戻り値:
+    - 教科別定量進捗
+    - 課題別おすすめ
+    - 現在の定量進捗率
+    - 予定到達までに必要な内部負荷
+    - おすすめ実施後の予測進捗率
+    """
+    quantitative_subjects = _build_quantitative_subject_summary(summary)
+
+    eligible = summary[
+        summary["unit_type"].astype(str).str.lower().isin(["page", "sheet"])
+    ].copy()
+
+    if eligible.empty:
+        return quantitative_subjects, [], 0.0, 0.0, 0.0
+
+    total_workload = float(
+        (eligible["total_units"] * eligible["weight_per_unit"]).sum()
+    )
+    completed_workload = float(
+        (eligible["completed_units"] * eligible["weight_per_unit"]).sum()
+    )
+
+    quantitative_pct = (
+        completed_workload / total_workload * 100.0
+        if total_workload > 0
+        else 0.0
+    )
+
+    target_workload = total_workload * max(planned_pct, 0.0) / 100.0
+    required_workload = max(target_workload - completed_workload, 0.0)
+
+    allocations = _allocate_subject_workload(
+        quantitative_subjects,
+        planned_pct,
+        required_workload,
+    )
+
+    recommendations: List[Dict[str, object]] = []
+    for subject, workload in allocations:
+        recommendations.extend(
+            _task_recommendations_for_subject(
+                summary,
+                subject,
+                workload,
+            )
+        )
+
+    recommended_workload = sum(
+        float(item["workload"]) for item in recommendations
+    )
+
+    expected_pct = (
+        min(
+            (completed_workload + recommended_workload)
+            / total_workload
+            * 100.0,
+            100.0,
+        )
+        if total_workload > 0
+        else 0.0
+    )
+
+    return (
+        quantitative_subjects,
+        recommendations,
+        quantitative_pct,
+        required_workload,
+        expected_pct,
+    )
+
+
+def _render_recovery_guide(
+    st,
+    summary: pd.DataFrame,
+    planned_pct: float,
+) -> None:
+    (
+        quantitative_subjects,
+        recommendations,
+        quantitative_pct,
+        required_workload,
+        expected_pct,
+    ) = _build_recovery_recommendations(summary, planned_pct)
+
+    st.subheader("📌 予定ラインに戻すための目安")
+    st.caption(
+        "ワーク・プリントなど、ページや枚数で管理できる課題だけから自動計算します。"
+        "英語教材、ビブリオバトル、レポートなどは含めません。"
+    )
+
+    if quantitative_subjects.empty:
+        st.info("ページ・枚数で計算できる未完了課題がありません。")
+        return
+
+    quantitative_margin = quantitative_pct - planned_pct
+
+    if required_workload <= 1e-9:
+        st.success(
+            "定量課題は予定ラインに到達しています。"
+            "次に進める教科は、体調や予定に合わせて選んでOKです。"
+        )
+        st.caption(
+            f"定量課題の進捗：{quantitative_pct:.1f}% ／ "
+            f"予定進捗：{planned_pct:.1f}% ／ "
+            f"差：{quantitative_margin:+.1f}%"
+        )
+        return
+
+    if not recommendations:
+        st.info(
+            "予定ラインとの差はありますが、具体的なページ・枚数へ変換できる"
+            "未完了課題がありません。"
+        )
+        return
+
+    subject_order: List[str] = []
+    for item in recommendations:
+        subject = str(item["subject"])
+        if subject not in subject_order:
+            subject_order.append(subject)
+
+    st.markdown("**優先順位**")
+    for index, subject in enumerate(subject_order, start=1):
+        subject_row = quantitative_subjects[
+            quantitative_subjects["subject"] == subject
+        ]
+        progress_text = ""
+        if not subject_row.empty:
+            progress_text = (
+                f"（定量課題の進捗 "
+                f"{float(subject_row.iloc[0]['progress_pct']):.0f}%）"
+            )
+        st.write(f"{index}. {subject}{progress_text}")
+
+    st.markdown("**次に進める量の目安**")
+
+    total_display_units = 0
+    for item in recommendations:
+        unit_type = str(item["unit_type"])
+        unit_label = "枚" if unit_type == "sheet" else "ページ"
+        units = int(item["units"])
+        total_display_units += units
+        st.write(
+            f"・{item['subject']}／{item['task_name']}："
+            f"**{units}{unit_label}**"
+        )
+
+    st.markdown(
+        f"""
+**合計目安：** {total_display_units}ページ・枚  
+**この目安を終えた後：** 定量課題の進捗が
+**{quantitative_pct:.1f}% → 約{expected_pct:.1f}%**  
+予定進捗との差が
+**{quantitative_margin:+.1f}% → 約{expected_pct - planned_pct:+.1f}%**
+"""
+    )
+
+    st.caption(
+        "※これは現時点の必要量の目安です。途中で登録すると自動再計算されます。"
+        "同じ教科が再び表示された場合は、まだその教科の遅れが残っています。"
+        "疲労や予定に応じて別教科へ変更しても問題ありません。"
+    )
+
 def render_homework(st, storage) -> None:
     st.header("📚 夏休み課題")
     st.caption("今日やる範囲を明確にして、遠征を除いた実質日数で進捗を管理します。")
@@ -503,6 +926,13 @@ def render_homework(st, storage) -> None:
             pct,
             f"{_format_units(done)} / {_format_units(total)}ポイント",
         )
+
+    st.divider()
+    _render_recovery_guide(
+        st,
+        summary,
+        planned_pct,
+    )
 
     st.divider()
     st.subheader("今日の完了を登録")
